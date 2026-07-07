@@ -1,9 +1,17 @@
 # Saídas e temporários da conversão
 netcdf_out/
 nc_out/
+nc/
 tmp/
 *.nc
 !*.example.nc
+
+# Saídas de job PBS/Torque
+*.out
+*.err
+convert2nc.log
+convert2nc.o*
+convert2nc.e*
 
 # Dados brutos de entrada
 *.bin

@@ -124,6 +124,21 @@ elif [ "$MODE" = "batch" ]; then
         [ "${#CTLS[@]}" -eq 0 ] && { echo "!! Nenhuma rodada no período."; exit 1; }
     fi
 
+    # Deduplica por INICIALIZAÇÃO: cada init roda 1x. Evita que 2 processos
+    # gravem o MESMO PREC_<data>.nc e colidam no HDF5 (causa de FALHA).
+    declare -A _VISTO
+    UNICOS=()
+    for c in "${CTLS[@]}"; do
+        init=$(basename "$c" | grep -oE '[0-9]{10}' | head -1)
+        key="${init:-$(basename "$c")}"
+        [ -n "${_VISTO[$key]:-}" ] && continue
+        _VISTO[$key]=1
+        UNICOS+=("$c")
+    done
+    ndup=$(( ${#CTLS[@]} - ${#UNICOS[@]} ))
+    CTLS=("${UNICOS[@]}")
+    [ "$ndup" -gt 0 ] && echo ">>> removidas $ndup rodada(s) duplicada(s) -> ${#CTLS[@]} única(s)"
+
     export OUTROOT COMPLEVEL JOBS_PER_FILE VARS
     convert_one() {
         ctl="$1"

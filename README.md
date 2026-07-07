@@ -88,6 +88,29 @@ disco e grava seus NetCDF — sem serializar arrays, então não há o limite de
 4 GiB do `multiprocessing`). Útil para aproveitar muitos núcleos numa conversão;
 o proveito vai até ~nº de variáveis do arquivo.
 
+## Acúmulo de precipitação em 24 h (`prec_acum24h.py`)
+
+Gera a precipitação **acumulada em 24 h** em **janela móvel de 12 h**, a partir
+do `PREC_<data>.nc` já convertido (PREC horária):
+
+```bash
+python prec_acum24h.py PREC_20260101.nc            # -> PREC-ACUM24h_20260101.nc
+python prec_acum24h.py PREC_20260101.nc -o saida/  --win 24 --step 12 --first 2
+```
+
+Janelas (índice de tempo 1-based, inclusivo): como o tempo 1 é a análise
+(hora 0) e a acumulação começa no tempo 2 (defasagem de 1 h), as janelas são
+`[2,25]`, `[14,37]`, `[26,49]`, … — 24 tempos cada, avançando de 12 em 12 h.
+Cada acúmulo é rotulado pela hora do **fim** da janela. Saída:
+`PREC-ACUM24h_<data_inicial>.nc` (todas as janelas no eixo `time`).
+
+Modos (`--mode`):
+
+- `sum` (padrão) — soma os 24 tempos da janela. Use quando a `PREC` é o
+  **incremento** por passo (precipitação de cada hora).
+- `diff` — `PREC[fim] - PREC[início-1]`. Use quando a `PREC` é **acumulada
+  desde o início da rodada** (total corrente).
+
 ## Submissão no cluster (PBS)
 
 O `roda_convert2nc.pbs` (nó de 256 processadores) tem dois modos, escolhidos na
