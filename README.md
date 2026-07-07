@@ -111,6 +111,16 @@ Modos (`--mode`):
 - `diff` — `PREC[fim] - PREC[início-1]`. Use quando a `PREC` é **acumulada
   desde o início da rodada** (total corrente).
 
+Várias datas de uma vez (aceita glob do shell):
+
+```bash
+python prec_acum24h.py ./nc/*/PREC_*.nc     # gera um PREC-ACUM24h por rodada
+```
+
+No cluster, use o `roda_prec_acum24h.pbs` (mesma lógica do batch de conversão:
+descoberta por glob, filtro de período `INIT_FROM/INIT_TO`, execução paralela nos
+256 núcleos). Envie com `qsub roda_prec_acum24h.pbs`.
+
 ## Submissão no cluster (PBS)
 
 O `roda_convert2nc.pbs` (nó de 256 processadores) tem dois modos, escolhidos na

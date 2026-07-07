@@ -1,0 +1,95 @@
+#!/bin/bash
+# =====================================================================
+# Submissão PBS/Torque do acúmulo de precipitação 24 h (janela 12 h).
+# Roda o prec_acum24h.py sobre VÁRIAS datas (os PREC_<data>.nc já
+# convertidos), em paralelo, saturando o nó de 256 processadores.
+#
+#     qsub roda_prec_acum24h.pbs
+# =====================================================================
+#PBS -N prec_acum24h
+#PBS -q FILA_AQUI                 # <-- troque pela fila do ian01
+##PBS -A grpeta
+#PBS -l nodes=1:ppn=256
+#PBS -l walltime=04:00:00
+#PBS -l mem=240gb
+#PBS -j oe
+#PBS -o prec_acum24h.log
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$PWD}"
+echo "Rodando em: $(hostname)  |  dir: $PWD  |  início: $(date)"
+
+# --- ambiente Python (ajuste o caminho do seu venv) ---
+source ~/venvs/convert2nc/bin/activate
+python --version
+
+# =====================================================================
+# CONFIG  — edite aqui
+# =====================================================================
+# Onde estão os PREC_<data>.nc já convertidos (uma subpasta por rodada).
+PREC_GLOB="./nc/*/PREC_*.nc"
+
+NCORES=256                       # processadores do nó
+JOBS=64                          # nº de acúmulos simultâneos (é leve; pode subir)
+
+# Parâmetros da janela (padrão = 24 h a cada 12 h, defasagem de 1 h).
+WIN=24                           # tempos por janela
+STEP=12                          # passo entre janelas (12=sobreposto; 24=sem sobrep.)
+FIRST=2                          # 1º tempo de acúmulo (1-based; 2 = defasagem 1 h)
+MODE="sum"                       # "sum" (PREC horária) ou "diff" (PREC acumulada)
+COMPLEVEL=1
+
+# Período de INICIALIZAÇÃO a processar (filtra pelas datas). Vazio = todas.
+# Aceita AAAAMMDDHH ou AAAAMMDD. Casa com o AAAAMMDD do nome PREC_<data>.nc.
+INIT_FROM=""
+INIT_TO=""
+# =====================================================================
+
+# --- descoberta dos arquivos (com fallback /lustre <-> /p) ---
+mapfile -t FILES < <(ls -1 $PREC_GLOB 2>/dev/null || true)
+if [ "${#FILES[@]}" -eq 0 ]; then
+    case "$PREC_GLOB" in
+        /lustre/*) ALT="/p/${PREC_GLOB#/lustre/}" ;;
+        /p/*)      ALT="/lustre/${PREC_GLOB#/p/}" ;;
+        *)         ALT="" ;;
+    esac
+    if [ -n "$ALT" ]; then
+        mapfile -t FILES < <(ls -1 $ALT 2>/dev/null || true)
+        [ "${#FILES[@]}" -gt 0 ] && { echo ">>> usando prefixo alternativo: $ALT"; }
+    fi
+fi
+[ "${#FILES[@]}" -eq 0 ] && { echo "!! Nenhum PREC casou com: $PREC_GLOB"; exit 1; }
+echo ">>> ${#FILES[@]} arquivo(s) PREC encontrados"
+
+# --- filtro por período (usa o AAAAMMDD do nome PREC_<data>.nc) ---
+if [ -n "$INIT_FROM" ] || [ -n "$INIT_TO" ]; then
+    LO="${INIT_FROM:-00000000}"; LO="${LO:0:8}"
+    HI="${INIT_TO:-99999999}";   HI="${HI:0:8}"
+    DENTRO=()
+    for f in "${FILES[@]}"; do
+        d=$(basename "$f" | grep -oE '[0-9]{8}' | head -1)
+        [ -z "$d" ] && continue
+        if (( 10#$d >= 10#$LO && 10#$d <= 10#$HI )); then DENTRO+=("$f"); fi
+    done
+    FILES=("${DENTRO[@]}")
+    echo ">>> período [${INIT_FROM:-*} .. ${INIT_TO:-*}] -> ${#FILES[@]} arquivo(s)"
+    [ "${#FILES[@]}" -eq 0 ] && { echo "!! Nenhum arquivo no período."; exit 1; }
+fi
+
+CONC="$JOBS"; [ "$CONC" -gt "$NCORES" ] && CONC="$NCORES"; [ "$CONC" -lt 1 ] && CONC=1
+echo ">>> $CONC acúmulos simultâneos (win=$WIN step=$STEP first=$FIRST mode=$MODE)"
+
+export WIN STEP FIRST MODE COMPLEVEL
+acum_one() {
+    f="$1"
+    log="$(dirname "$f")/prec_acum24h_$(basename "$f" .nc).log"
+    python prec_acum24h.py "$f" --win "$WIN" --step "$STEP" --first "$FIRST" \
+        --mode "$MODE" --complevel "$COMPLEVEL" > "$log" 2>&1 \
+        && echo "[$(date +%T)] OK   $(basename "$f")" \
+        || echo "[$(date +%T)] FALHA $(basename "$f") (veja $log)"
+}
+export -f acum_one
+
+printf '%s\n' "${FILES[@]}" | xargs -I{} -P "$CONC" bash -c 'acum_one "$@"' _ {}
+
+echo "Fim: $(date)"

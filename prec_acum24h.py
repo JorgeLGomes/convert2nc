@@ -86,7 +86,9 @@ def main():
     ap = argparse.ArgumentParser(
         description="Acúmulo móvel de precipitação em 24 h, a cada 12 h.",
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("entrada", help="NetCDF de PREC (dims time/lat/lon).")
+    ap.add_argument("entrada", nargs="+",
+                    help="Um ou mais NetCDF de PREC (dims time/lat/lon). "
+                         "Aceita glob do shell, ex.: ./nc/*/PREC_*.nc")
     ap.add_argument("-o", "--outdir", default=None,
                     help="Diretório de saída (padrão: mesmo do arquivo de entrada).")
     ap.add_argument("--win", type=int, default=24, help="Nº de tempos por janela (24).")
@@ -102,23 +104,35 @@ def main():
     ap.add_argument("--complevel", type=int, default=1, help="Compressão zlib (1).")
     args = ap.parse_args()
 
-    if not os.path.exists(args.entrada):
-        sys.exit(f"Arquivo não encontrado: {args.entrada}")
+    ok = 0
+    for inp in args.entrada:
+        try:
+            if processa_um(inp, args):
+                ok += 1
+        except Exception as e:
+            print(f"[FALHA] {os.path.basename(inp)}: {e}", flush=True)
+    print(f"\nConcluído: {ok}/{len(args.entrada)} arquivo(s) processado(s).")
 
-    ds = xr.open_dataset(args.entrada)
+
+def processa_um(inp, args):
+    """Gera o PREC-ACUM24h de UM arquivo PREC. Retorna o caminho de saída."""
+    if not os.path.exists(inp):
+        print(f"[FALHA] arquivo não encontrado: {inp}", flush=True)
+        return None
+
+    ds = xr.open_dataset(inp)
     var = detecta_var(ds, args.varname)
     da = ds[var]
     if "time" not in da.dims:
-        sys.exit(f"Variável '{var}' não tem dimensão 'time'.")
+        print(f"[FALHA] {os.path.basename(inp)}: '{var}' sem dimensão time", flush=True)
+        return None
 
     nt = da.sizes["time"]
     js = janelas(nt, args.win, args.step, args.first)
     if not js:
-        sys.exit(f"Nenhuma janela cabe: nt={nt}, win={args.win}, first={args.first}.")
-
-    print(f"Variável: {var} | tempos={nt} | win={args.win} step={args.step} "
-          f"first={args.first} | modo={args.mode}")
-    print(f"{len(js)} janela(s): {js[0]} ... {js[-1]} (índices 1-based, inclusivo)")
+        print(f"[FALHA] {os.path.basename(inp)}: nenhuma janela (nt={nt}, "
+              f"win={args.win}, first={args.first})", flush=True)
+        return None
 
     tempos = pd.to_datetime(np.asarray(da["time"].values))
     campos, tempos_fim = [], []
@@ -155,14 +169,16 @@ def main():
         enc["PREC_ACUM24h"].update(zlib=True, complevel=int(args.complevel),
                                    chunksizes=(1, ny, nx))
 
-    data = data_inicial(args.entrada, ds, args.date)
-    outdir = args.outdir or os.path.dirname(os.path.abspath(args.entrada))
+    data = data_inicial(inp, ds, args.date)
+    outdir = args.outdir or os.path.dirname(os.path.abspath(inp))
     os.makedirs(outdir, exist_ok=True)
     caminho = os.path.join(outdir, f"PREC-ACUM24h_{data}.nc")
     out.to_dataset(name="PREC_ACUM24h").to_netcdf(caminho, format="NETCDF4", encoding=enc)
     ds.close()
 
-    print(f"[OK] {len(js)} acúmulos -> {caminho}")
+    print(f"[OK] {os.path.basename(inp)}: {len(js)} acúmulos "
+          f"({js[0]}..{js[-1]}) -> {os.path.basename(caminho)}", flush=True)
+    return caminho
 
 
 if __name__ == "__main__":
