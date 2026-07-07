@@ -385,7 +385,8 @@ def read_grib_via_ctl_wgrib2(info, wgrib2="wgrib2"):
             continue
         out = os.path.join(tmpdir, f"_{pd.Timestamp(vt).strftime('%Y%m%d%H')}.nc")
         res = subprocess.run([wgrib2, grb, "-netcdf", out],
-                             capture_output=True, text=True)
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             universal_newlines=True)  # compat. Python 3.6
         if res.returncode != 0 or not os.path.exists(out):
             print(f"  Aviso: wgrib2 falhou para {os.path.basename(grb)}: "
                   f"{res.stderr[-300:]}")
