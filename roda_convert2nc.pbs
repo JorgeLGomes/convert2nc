@@ -46,6 +46,11 @@ CTL_GLOB="/lustre/projetos/grpeta/Team/jorge.gomes/Eta_install/out/ams_08km/binc
 OUTROOT="./nc"                   # cada rodada vai para OUTROOT/AAAAMMDDHH/
 JOBS_PER_FILE="8"                # processos internos por conversão
 # nº de conversões simultâneas = NCORES / JOBS_PER_FILE
+
+# Período de INICIALIZAÇÃO a converter (filtra as rodadas). Vazio = todas.
+# Aceita AAAAMMDDHH ou AAAAMMDD (o dia inteiro). Ex.: INIT_FROM="2026010100"
+INIT_FROM=""                     # rodada inicial (inclusive)
+INIT_TO=""                       # rodada final   (inclusive)
 # =====================================================================
 
 VARG=()
@@ -91,16 +96,33 @@ elif [ "$MODE" = "batch" ]; then
     # Mantém só os .ctl MESTRES (série completa) e descarta os .ctl POR-TEMPO
     # (nome com dois grupos de 10 dígitos: _<init>_<valid>.ctl). Cada mestre já
     # contém TODOS os tempos -> 1 arquivo por variável com toda a série.
+    # Mestre = nome com UMA data; por-tempo/dia têm DUAS (ex.: _<init>_<valid>).
+    # Conta grupos de >=8 dígitos no nome (robusto a _, +, . e datas de 8/10 díg.).
     MESTRES=()
     for c in "${CTLS[@]}"; do
-        b=$(basename "$c")
-        [[ "$b" =~ _[0-9]{10}_[0-9]{10}\.ctl$ ]] && continue
+        nd=$(basename "$c" | grep -oE '[0-9]{8,}' | wc -l)
+        [ "$nd" -gt 1 ] && continue
         MESTRES+=("$c")
     done
     npt=$(( ${#CTLS[@]} - ${#MESTRES[@]} ))
     CTLS=("${MESTRES[@]}")
     [ "${#CTLS[@]}" -eq 0 ] && { echo "!! Só havia .ctl por-tempo; nada a converter."; exit 1; }
-    echo ">>> ${#CTLS[@]} rodada(s) mestre a converter (ignorados $npt .ctl por-tempo)"
+    echo ">>> ${#CTLS[@]} rodada(s) mestre (ignorados $npt .ctl por-tempo)"
+
+    # Filtro por PERÍODO de inicialização (INIT_FROM..INIT_TO), inclusive.
+    if [ -n "$INIT_FROM" ] || [ -n "$INIT_TO" ]; then
+        LO="${INIT_FROM:-0000000000}"; [ "${#LO}" -eq 8 ] && LO="${LO}00"
+        HI="${INIT_TO:-9999999999}";   [ "${#HI}" -eq 8 ] && HI="${HI}99"
+        DENTRO=()
+        for c in "${CTLS[@]}"; do
+            init=$(basename "$c" | grep -oE '[0-9]{10}' | head -1)
+            [ -z "$init" ] && continue
+            if (( 10#$init >= 10#$LO && 10#$init <= 10#$HI )); then DENTRO+=("$c"); fi
+        done
+        CTLS=("${DENTRO[@]}")
+        echo ">>> período [${INIT_FROM:-*} .. ${INIT_TO:-*}] -> ${#CTLS[@]} rodada(s)"
+        [ "${#CTLS[@]}" -eq 0 ] && { echo "!! Nenhuma rodada no período."; exit 1; }
+    fi
 
     export OUTROOT COMPLEVEL JOBS_PER_FILE VARS
     convert_one() {
