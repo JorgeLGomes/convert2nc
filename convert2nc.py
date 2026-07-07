@@ -537,11 +537,53 @@ def _ler_bloco_tempo(info, ti, mm, fpt):
     return mm[ti * per_time:(ti + 1) * per_time].reshape(fpt, ny, nx)
 
 
-def converter_binario(info, outdir, data_str, wanted=None, complevel=1,
+def _worker_converter_chunk(args):
+    """Worker picklável: converte um SUBCONJUNTO de variáveis (lê seu próprio dado).
+
+    Só nomes/parâmetros são serializados (nada de arrays grandes) — cada processo
+    faz o próprio I/O do binário. Evita o limite de pickle de 4 GiB.
+    """
+    info, chunk, outdir, data_str, complevel = args
+    return converter_binario(info, outdir, data_str, wanted=chunk,
+                             complevel=complevel, jobs=1, progresso_cada=0)
+
+
+def converter_binario(info, outdir, data_str, wanted=None, complevel=1, jobs=1,
                       progresso_cada=20):
-    """Converte o binário GrADS para NetCDF (1 arquivo por variável), tempo a tempo."""
+    """Converte o binário GrADS para NetCDF (1 arquivo por variável), tempo a tempo.
+
+    jobs>1: divide as variáveis entre `jobs` processos; cada um lê só as suas do
+    disco e grava seus NetCDF (sem serializar arrays). Escala numa mesma conversão.
+    """
     import netCDF4
     os.makedirs(outdir, exist_ok=True)
+
+    # resolve a seleção de variáveis já aqui (para poder dividir entre processos)
+    sel0 = list(info["vars"])
+    if wanted:
+        wl0 = [w.strip().lower() for w in wanted]
+        sel0 = [v for v in info["vars"] if v[0].lower() in wl0]
+        faltando = [w for w in wanted
+                    if w.strip().lower() not in [v[0].lower() for v in info["vars"]]]
+        if faltando:
+            print(f"  Aviso: variáveis ausentes e ignoradas: {faltando}", flush=True)
+    if not sel0:
+        sys.exit("Nenhuma variável para converter. Verifique --vars.")
+
+    # ---- caminho PARALELO: divide variáveis em `jobs` grupos (round-robin) ----
+    if jobs and jobs > 1 and len(sel0) > 1:
+        from concurrent.futures import ProcessPoolExecutor
+        nomes = [v[0] for v in sel0]
+        n = min(jobs, len(nomes))
+        chunks = [nomes[i::n] for i in range(n)]          # balanceia 3D entre grupos
+        print(f"  {len(nomes)} variável(is) em {n} processo(s) paralelo(s)...",
+              flush=True)
+        tarefas = [(info, ch, outdir, data_str, complevel) for ch in chunks]
+        gerados = []
+        with ProcessPoolExecutor(max_workers=n) as ex:
+            for res in ex.map(_worker_converter_chunk, tarefas):
+                gerados.extend(res)
+        return gerados
     nx, ny = info["nx"], info["ny"]
     undef = info["undef"]
     yrev, zrev = info["yrev"], info["zrev"]
@@ -552,18 +594,7 @@ def converter_binario(info, outdir, data_str, wanted=None, complevel=1,
     times = info["times"]
     ntime = len(times)
     offsets, nfields_var, fpt = _ordena_campos(info["vars"])
-
-    # seleção de variáveis
-    sel = list(info["vars"])
-    if wanted:
-        wl = [w.strip().lower() for w in wanted]
-        sel = [v for v in info["vars"] if v[0].lower() in wl]
-        faltando = [w for w in wanted
-                    if w.strip().lower() not in [v[0].lower() for v in info["vars"]]]
-        if faltando:
-            print(f"  Aviso: variáveis ausentes e ignoradas: {faltando}", flush=True)
-    if not sel:
-        sys.exit("Nenhuma variável para converter. Verifique --vars.")
+    sel = sel0
 
     # memmap único (caso arquivo único)
     mm = None
@@ -700,8 +731,8 @@ def main():
                     help="Nível de compressão zlib 0-9 (0=sem compressão, mais "
                          "rápido; 1=padrão rápido). Padrão: 1.")
     ap.add_argument("--jobs", "-j", type=int, default=1,
-                    help="Nº de processos para gravar variáveis em paralelo "
-                         "(só GRIB2; o binário grava tempo a tempo em 1 passo).")
+                    help="Nº de processos paralelos (divide as variáveis entre "
+                         "eles). Útil para aproveitar muitos núcleos numa conversão.")
     args = ap.parse_args()
 
     if not os.path.exists(args.entrada):
@@ -731,12 +762,10 @@ def main():
         print(f"[GrADS/binário] {os.path.basename(args.entrada)} — streaming tempo a tempo")
         print(f"\nData na nomenclatura: {data_str}")
         print(f"Saída: {os.path.abspath(args.outdir)}")
-        print(f"Compressão zlib nível {args.complevel}\n")
-        if args.jobs > 1:
-            print("  (--jobs é ignorado no binário: gravação já é 1 passo eficiente)\n")
+        print(f"Compressão zlib nível {args.complevel}  |  jobs={args.jobs}\n")
         print("Convertendo variáveis (1 arquivo por variável):")
         gerados = converter_binario(info, args.outdir, data_str, apenas,
-                                    complevel=args.complevel)
+                                    complevel=args.complevel, jobs=args.jobs)
     # ---- GRIB2: lê para memória e grava por variável ----
     else:
         if modo == "grib":

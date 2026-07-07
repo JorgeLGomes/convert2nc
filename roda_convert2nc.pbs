@@ -1,0 +1,89 @@
+#!/bin/bash
+# =====================================================================
+# Submissão PBS/Torque do Convert2nc (Eta -> NetCDF, 1 variável/arquivo).
+# Nó com 256 processadores. Envie da pasta do projeto:
+#     qsub roda_convert2nc.pbs
+# Acompanhe:  qstat -u $USER   |  tail -f convert2nc.log
+#
+# Dois modos (escolha em CONFIG, abaixo):
+#   MODE=single -> converte UM .ctl usando vários processos por variável.
+#   MODE=batch  -> converte VÁRIOS .ctl (glob) em paralelo, saturando o nó.
+# =====================================================================
+#PBS -N convert2nc
+#PBS -q FILA_AQUI                 # <-- troque pela fila do ian01 (qstat -q p/ listar)
+##PBS -A grpeta                  # descomente se o cluster exigir conta/grupo
+#PBS -l nodes=1:ppn=256
+#PBS -l walltime=12:00:00
+#PBS -l mem=240gb
+#PBS -j oe                        # junta stdout+stderr
+#PBS -o convert2nc.log
+
+set -euo pipefail
+
+# --- diretório de submissão (onde está o projeto) ---
+cd "${PBS_O_WORKDIR:-$PWD}"
+echo "Rodando em: $(hostname)  |  dir: $PWD  |  início: $(date)"
+
+# --- ambiente Python (ajuste o caminho do seu venv/conda) ---
+source ~/venvs/convert2nc/bin/activate
+python --version
+
+# =====================================================================
+# CONFIG  — edite aqui
+# =====================================================================
+MODE="single"                    # "single" ou "batch"
+NCORES=256                       # processadores do nó
+VARS=""                          # ex.: "TP2M,U10M,V10M,PREC"; vazio = todas
+COMPLEVEL=1                      # 1 = padrão (bom p/ 3D); 0 = sem compressão (arquivos grandes)
+
+# --- MODE=single: um .ctl, muitos processos por variável ---
+CTL="/lustre/projetos/grpeta/Team/jorge.gomes/Eta_install/out/ams_08km/binctl/2026010100/E03/Eta08_E03_2026010100.ctl"
+OUTDIR="."
+JOBS="48"                        # processos internos (útil até ~nº de variáveis)
+
+# --- MODE=batch: muitos .ctl em paralelo ---
+CTL_GLOB="/lustre/projetos/grpeta/Team/jorge.gomes/Eta_install/out/ams_08km/binctl/*/E03/Eta08_E03_*.ctl"
+OUTROOT="./nc"                   # cada rodada vai para OUTROOT/AAAAMMDDHH/
+JOBS_PER_FILE="8"                # processos internos por conversão
+# nº de conversões simultâneas = NCORES / JOBS_PER_FILE
+# =====================================================================
+
+VARG=()
+[ -n "$VARS" ] && VARG=(--vars "$VARS")
+
+if [ "$MODE" = "single" ]; then
+    echo ">>> MODE=single | CTL=$CTL | jobs=$JOBS | complevel=$COMPLEVEL"
+    mkdir -p "$OUTDIR"
+    time python convert2nc.py "$CTL" -o "$OUTDIR" \
+        --complevel "$COMPLEVEL" --jobs "$JOBS" "${VARG[@]}"
+
+elif [ "$MODE" = "batch" ]; then
+    CONC=$(( NCORES / JOBS_PER_FILE )); [ "$CONC" -lt 1 ] && CONC=1
+    echo ">>> MODE=batch | glob=$CTL_GLOB"
+    echo ">>> $CONC conversões simultâneas x $JOBS_PER_FILE processos cada (= $((CONC*JOBS_PER_FILE)) núcleos)"
+
+    mapfile -t CTLS < <(ls -1 $CTL_GLOB 2>/dev/null || true)
+    [ "${#CTLS[@]}" -eq 0 ] && { echo "!! Nenhum .ctl casou com o glob."; exit 1; }
+    echo ">>> ${#CTLS[@]} arquivo(s) .ctl a converter"
+
+    export OUTROOT COMPLEVEL JOBS_PER_FILE VARS
+    convert_one() {
+        ctl="$1"
+        init=$(basename "$ctl" | grep -oE '[0-9]{10}' | head -1)
+        out="$OUTROOT/${init:-saida}"; mkdir -p "$out"
+        vargs=(); [ -n "${VARS:-}" ] && vargs=(--vars "$VARS")
+        echo "[$(date +%T)] início $init -> $out"
+        python convert2nc.py "$ctl" -o "$out" \
+            --complevel "$COMPLEVEL" --jobs "$JOBS_PER_FILE" "${vargs[@]}" \
+            > "$out/convert_${init}.log" 2>&1 \
+            && echo "[$(date +%T)] OK   $init" \
+            || echo "[$(date +%T)] FALHA $init (veja $out/convert_${init}.log)"
+    }
+    export -f convert_one
+
+    printf '%s\n' "${CTLS[@]}" | xargs -I{} -P "$CONC" bash -c 'convert_one "$@"' _ {}
+else
+    echo "!! MODE inválido: $MODE (use 'single' ou 'batch')"; exit 1
+fi
+
+echo "Fim: $(date)"

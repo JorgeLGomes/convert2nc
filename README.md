@@ -80,3 +80,23 @@ Para reduzir tempo/disco, converta só as variáveis necessárias:
 ```bash
 python convert2nc.py entrada.ctl -o saida/ --vars TP2M,U10M,V10M,PREC
 ```
+
+`--jobs N` divide as variáveis entre N processos (cada um lê a sua parte do
+disco e grava seus NetCDF — sem serializar arrays, então não há o limite de
+4 GiB do `multiprocessing`). Útil para aproveitar muitos núcleos numa conversão;
+o proveito vai até ~nº de variáveis do arquivo.
+
+## Submissão no cluster (PBS)
+
+O `roda_convert2nc.pbs` (nó de 256 processadores) tem dois modos, escolhidos na
+seção CONFIG do script:
+
+- `MODE=single` — converte **um** `.ctl` usando `--jobs` processos por variável.
+  Ajuste `JOBS` (útil até ~nº de variáveis do arquivo).
+- `MODE=batch` — converte **vários** `.ctl` (glob de rodadas) em paralelo,
+  saturando o nó: roda `256 / JOBS_PER_FILE` conversões simultâneas, cada uma com
+  `JOBS_PER_FILE` processos. Cada rodada vai para `OUTROOT/AAAAMMDDHH/`.
+
+Envie com `qsub roda_convert2nc.pbs`. Ajuste a fila (`#PBS -q`), o caminho do
+venv e os caminhos dos dados. Em Lustre, mais processos = mais aberturas de
+arquivo; se a IO saturar, reduza `JOBS`/`JOBS_PER_FILE`.
