@@ -1,0 +1,29 @@
+# Saídas e temporários da conversão
+netcdf_out/
+nc_out/
+tmp/
+*.nc
+!*.example.nc
+
+# Dados brutos de entrada
+*.bin
+*.dat
+*.gra
+*.grd
+*.grib2
+*.grb2
+*.grib
+*.grb
+*.idx
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# Sistema
+.DS_Store
+*.log
