@@ -63,9 +63,11 @@ grava direto em cada NetCDF. Isso significa:
   por vez. Escala para domínios grandes (ex.: ams_08km 931×875 × 265 tempos, com
   todas as variáveis 3D e todos os níveis).
 - **Cada byte lido uma vez** — leitura sequencial, ótima para o Lustre.
-- **Sem `multiprocessing` no binário** — evita o limite de pickle de 4 GiB por
-  variável 3D (que causava `OverflowError` com `--jobs`). Por isso `--jobs` é
-  ignorado no binário; ele já grava em um único passo eficiente.
+- **Chunk alinhado ao tempo** — cada variável é gravada com chunk de 1 instante
+  (`(1, lat, lon)` no 2D; `(1, 1, lat, lon)` no 3D). Assim cada escrita tempo-a-
+  tempo preenche um chunk inteiro, sem read-modify-write. Sem isso, o chunk
+  padrão do HDF5 abrange vários tempos e é maior que o cache (1 MB), tornando a
+  gravação **muito** lenta (uma variável 2D de 265 tempos podia levar minutos).
 
 Compressão (`--complevel`):
 

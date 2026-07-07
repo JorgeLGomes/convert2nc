@@ -636,6 +636,12 @@ def converter_binario(info, outdir, data_str, wanted=None, complevel=1, jobs=1,
         kw = dict(fill_value=fillv)
         if complevel and complevel > 0:
             kw.update(zlib=True, complevel=int(complevel))
+            # Chunk = 1 tempo (e 1 nível, no 3D). Alinha o chunk ao padrão de
+            # escrita (um instante por vez): cada gravação preenche um chunk
+            # inteiro, sem read-modify-write/recompressão. Sem isso, o chunk
+            # padrão abrange vários tempos e é maior que o cache do HDF5, o que
+            # torna a escrita tempo-a-tempo MUITO lenta (efeito super-linear).
+            kw["chunksizes"] = (1, 1, ny, nx) if eh_3d else (1, ny, nx)
         dv = nc.createVariable(name, "f4", dims, **kw)
         if units:
             dv.units = units
