@@ -63,8 +63,44 @@ elif [ "$MODE" = "batch" ]; then
     echo ">>> $CONC conversões simultâneas x $JOBS_PER_FILE processos cada (= $((CONC*JOBS_PER_FILE)) núcleos)"
 
     mapfile -t CTLS < <(ls -1 $CTL_GLOB 2>/dev/null || true)
-    [ "${#CTLS[@]}" -eq 0 ] && { echo "!! Nenhum .ctl casou com o glob."; exit 1; }
-    echo ">>> ${#CTLS[@]} arquivo(s) .ctl a converter"
+
+    # /lustre costuma ser symlink p/ /p (visível no login, às vezes não no nó).
+    # Se não casou, tenta trocar o prefixo automaticamente.
+    if [ "${#CTLS[@]}" -eq 0 ]; then
+        case "$CTL_GLOB" in
+            /lustre/*) ALT="/p/${CTL_GLOB#/lustre/}" ;;
+            /p/*)      ALT="/lustre/${CTL_GLOB#/p/}" ;;
+            *)         ALT="" ;;
+        esac
+        if [ -n "$ALT" ]; then
+            mapfile -t CTLS < <(ls -1 $ALT 2>/dev/null || true)
+            [ "${#CTLS[@]}" -gt 0 ] && { echo ">>> usando prefixo alternativo: $ALT"; CTL_GLOB="$ALT"; }
+        fi
+    fi
+
+    if [ "${#CTLS[@]}" -eq 0 ]; then
+        echo "!! Nenhum .ctl casou com o glob:"
+        echo "     $CTL_GLOB"
+        base="${CTL_GLOB%%/binctl/*}/binctl"
+        echo "   Conferindo $base :"
+        ls -ld "$base" 2>/dev/null || echo "   (diretório binctl não acessível deste nó)"
+        ls -1 "$base" 2>/dev/null | head || true
+        exit 1
+    fi
+
+    # Mantém só os .ctl MESTRES (série completa) e descarta os .ctl POR-TEMPO
+    # (nome com dois grupos de 10 dígitos: _<init>_<valid>.ctl). Cada mestre já
+    # contém TODOS os tempos -> 1 arquivo por variável com toda a série.
+    MESTRES=()
+    for c in "${CTLS[@]}"; do
+        b=$(basename "$c")
+        [[ "$b" =~ _[0-9]{10}_[0-9]{10}\.ctl$ ]] && continue
+        MESTRES+=("$c")
+    done
+    npt=$(( ${#CTLS[@]} - ${#MESTRES[@]} ))
+    CTLS=("${MESTRES[@]}")
+    [ "${#CTLS[@]}" -eq 0 ] && { echo "!! Só havia .ctl por-tempo; nada a converter."; exit 1; }
+    echo ">>> ${#CTLS[@]} rodada(s) mestre a converter (ignorados $npt .ctl por-tempo)"
 
     export OUTROOT COMPLEVEL JOBS_PER_FILE VARS
     convert_one() {
