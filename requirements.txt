@@ -6,11 +6,12 @@ pandas
 xarray
 netCDF4          # escrita dos arquivos .nc (engine NETCDF4)
 
-# --- Opcional: leitura de GRIB2 direto (.grib2) sem wgrib2 ---
-# Requer a biblioteca de sistema ECCODES. Via pip pode não bastar em alguns
-# sistemas; nesse caso use o ambiente conda (environment.yml), que já traz o
-# eccodes. Deixe comentado se for usar só binário GrADS ou --grib via wgrib2.
-# cfgrib
+# --- GRIB2 sem wgrib2 (motor cfgrib, padrão para --grib) ---
+# Lê GRIB2 direto em Python. Requer a lib de sistema ECCODES. O wheel 'eccodes'
+# do PyPI já traz a lib na maioria dos casos; em cluster, o mais robusto é conda:
+#   conda install -c conda-forge cfgrib eccodes
+cfgrib
+eccodes
 
-# Ferramenta de sistema (NÃO via pip — precisa estar no PATH):
-#   wgrib2  -> só para converter GRIB2 descrito por .ctl (opção --grib)
+# Opcional: só se usar --grib-engine wgrib2 (precisa de wgrib2 COM suporte NetCDF)
+#   wgrib2 (binário do sistema, não via pip)

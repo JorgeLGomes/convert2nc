@@ -138,18 +138,21 @@ arquivo; se a IO saturar, reduza `JOBS`/`JOBS_PER_FILE`.
 
 ### Binário ou GRIB2 (`FORMATO`)
 
-- `FORMATO="bin"` (padrão) — `.ctl` + `.bin`, leitor nativo streaming (o mais
-  otimizado).
-- `FORMATO="grib2"` — `.ctl` com `DTYPE grib2`; usa o `wgrib2` (defina `WGRIB2`).
-  Aponte `CTL_GLOB`/`CTL` para os `.ctl` do GRIB2.
+- `FORMATO="bin"` (padrão) — `.ctl` + `.bin`, leitor nativo streaming.
+- `FORMATO="grib2"` — `.ctl` com `DTYPE grib2`. Aponte `CTL_GLOB`/`CTL` para os
+  `.ctl` do GRIB2. Dois motores (`GRIB_ENGINE`):
+  - `cfgrib` (padrão) — lê o GRIB2 direto em Python (eccodes), **sem wgrib2**,
+    em streaming tempo a tempo (mesma memória/chunking do binário). Requer
+    `cfgrib`+`eccodes` (via conda: `conda install -c conda-forge cfgrib eccodes`).
+  - `wgrib2` — usa `wgrib2 -netcdf` (precisa de um wgrib2 **com suporte NetCDF**).
 
-Observações do caminho GRIB2 (menos otimizado que o binário):
+Nomes das variáveis no GRIB2: o cfgrib usa os nomes dele (ex.: `tp`, `unknown`,
+`t2m`), que podem diferir dos nomes GrADS (`PREC`, `TP2M`). Descubra com:
 
-- Requer o executável **wgrib2** no cluster.
-- A conversão é feita via `wgrib2 -netcdf`, então os **nomes das variáveis** na
-  saída são os do wgrib2 (ex.: `APCP_surface`, `TMP_2maboveground`), **não** os
-  nomes GrADS (`PREC`, `TP2M`). Logo, `VARS="PREC"` pode **não casar**. Rode
-  primeiro `MODE=single` com `VARS=""` para ver os nomes gerados e então defina
-  `VARS` com o nome do wgrib2.
-- Lê para a memória (sem o streaming do binário) e usa `--jobs 1` por conversão;
-  a paralelização é **entre arquivos** (`JOBS_PER_FILE` controla a concorrência).
+```bash
+python convert2nc.py <um.ctl> --grib --list-vars
+```
+
+Depois selecione com `VARS` (nome do cfgrib) e, se quiser, renomeie a saída com
+`GRIB_ASNAME` (ex.: `VARS="tp"` + `GRIB_ASNAME="PREC"` → `PREC_<data>.nc`). A
+paralelização é **entre arquivos** (`JOBS_PER_FILE`).

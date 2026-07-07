@@ -693,6 +693,151 @@ def converter_binario(info, outdir, data_str, wanted=None, complevel=1, jobs=1,
 
 
 # =========================================================================
+# GRIB2 via cfgrib (SEM wgrib2) — streaming tempo a tempo
+# --------------------------------------------------------------------------
+# Lê o .ctl (template + tempos) e abre cada GRIB2 por-tempo com cfgrib/eccodes,
+# gravando cada variável direto em NetCDF (memória mínima). Não requer wgrib2.
+# =========================================================================
+def _grib2_campos(fn):
+    """Abre um GRIB2 e devolve {nome: (lat, lon, valores, lev_or_None)}.
+
+    Aceita variáveis 2D (lat,lon) e 3D (um eixo vertical + lat,lon).
+    """
+    import cfgrib
+    out = {}
+    for ds in cfgrib.open_datasets(fn, backend_kwargs={"indexpath": ""}):
+        if "latitude" not in ds.coords or "longitude" not in ds.coords:
+            continue
+        lat = np.asarray(ds["latitude"].values)
+        lon = np.asarray(ds["longitude"].values)
+        for v in ds.data_vars:
+            da = ds[v]
+            if da.dims[-2:] != ("latitude", "longitude"):
+                continue
+            extra = list(da.dims[:-2])
+            if len(extra) == 0:
+                out[str(v)] = (lat, lon, da.values.astype("f4"), None)
+            elif len(extra) == 1:
+                lv = (extra[0], np.atleast_1d(da[extra[0]].values))
+                out[str(v)] = (lat, lon, da.values.astype("f4"), lv)
+    return out
+
+
+def _grib2_primeiro_arquivo(info):
+    dset = info["dset"]
+    for vt in info["times"]:
+        fn = _tmpl_name(dset, vt) if info.get("template", True) else dset
+        if os.path.exists(fn):
+            return fn
+    return None
+
+
+def listar_vars_grib2(info):
+    """Imprime as variáveis disponíveis no 1º GRIB2 (para escolher em --vars)."""
+    f0 = _grib2_primeiro_arquivo(info)
+    if not f0:
+        sys.exit("Nenhum arquivo GRIB2 encontrado (confira DSET/template do .ctl).")
+    base = _grib2_campos(f0)
+    print(f"Variáveis no GRIB2 ({os.path.basename(f0)}):")
+    for v, (lat, lon, arr, lev) in base.items():
+        tipo = f"3D ({lev[0]}={len(lev[1])})" if lev is not None else "2D"
+        print(f"  {v:<18} {tipo:<16} grade {len(lat)}x{len(lon)}")
+
+
+def converter_grib2_cfgrib(info, outdir, data_str, wanted=None, complevel=1,
+                           asname=None, progresso_cada=20):
+    """Converte GRIB2 (descrito por .ctl) para NetCDF via cfgrib, tempo a tempo."""
+    import netCDF4
+    os.makedirs(outdir, exist_ok=True)
+    times = info["times"]
+    ntime = len(times)
+    dset = info["dset"]
+
+    f0 = _grib2_primeiro_arquivo(info)
+    if not f0:
+        sys.exit("Nenhum arquivo GRIB2 encontrado (confira DSET/template do .ctl).")
+    base = _grib2_campos(f0)
+    todos = list(base.keys())
+
+    sel = todos
+    if wanted:
+        wl = [w.strip().lower() for w in wanted]
+        sel = [v for v in todos if v.lower() in wl]
+        if not sel:
+            sys.exit(f"Variáveis {wanted} não encontradas. Disponíveis: {todos}\n"
+                     f"(use --list-vars para ver os nomes do cfgrib)")
+    if asname and len(sel) != 1:
+        print("  Aviso: --asname só se aplica ao selecionar 1 variável; ignorado.")
+        asname = None
+
+    fillv = np.float32(9.969209968386869e36)
+    writers = {}
+    for v in sel:
+        lat, lon, arr, lev = base[v]
+        ny, nx = len(lat), len(lon)
+        eh_3d = lev is not None
+        outname = asname if (asname and len(sel) == 1) else v
+        path = os.path.join(outdir, f"{outname}_{data_str}.nc")
+        nc = netCDF4.Dataset(path, "w", format="NETCDF4")
+        nc.createDimension("time", ntime)
+        nc.createDimension("lat", ny)
+        nc.createDimension("lon", nx)
+        t0 = pd.Timestamp(times[0])
+        tv = nc.createVariable("time", "f8", ("time",))
+        tv.units = f"hours since {t0.strftime('%Y-%m-%d %H:%M:%S')}"
+        tv.calendar = "standard"
+        tv[:] = [(pd.Timestamp(t) - t0).total_seconds() / 3600.0 for t in times]
+        latv = nc.createVariable("lat", "f4", ("lat",))
+        latv[:] = lat
+        latv.units = "degrees_north"
+        lonv = nc.createVariable("lon", "f4", ("lon",))
+        lonv[:] = lon
+        lonv.units = "degrees_east"
+        if eh_3d:
+            k = len(lev[1])
+            nc.createDimension("lev", k)
+            levv = nc.createVariable("lev", "f4", ("lev",))
+            levv[:] = np.asarray(lev[1], "f4")
+            levv.long_name = str(lev[0])
+            dims = ("time", "lev", "lat", "lon")
+            chunk = (1, 1, ny, nx)
+        else:
+            dims = ("time", "lat", "lon")
+            chunk = (1, ny, nx)
+        kw = dict(fill_value=fillv)
+        if complevel and complevel > 0:
+            kw.update(zlib=True, complevel=int(complevel), chunksizes=chunk)
+        dv = nc.createVariable(outname, "f4", dims, **kw)
+        writers[v] = (nc, dv, outname, eh_3d)
+
+    print(f"  {len(writers)} variável(is) x {ntime} tempos (GRIB2/cfgrib)...", flush=True)
+    for ti, vt in enumerate(times):
+        fn = _tmpl_name(dset, vt) if info.get("template", True) else dset
+        if not os.path.exists(fn):
+            continue
+        campos = _grib2_campos(fn)
+        for v, (nc, dv, outname, eh_3d) in writers.items():
+            if v not in campos:
+                continue
+            arr = campos[v][2]
+            if eh_3d:
+                dv[ti, :, :, :] = arr
+            else:
+                dv[ti, :, :] = arr
+        if progresso_cada and (ti + 1) % progresso_cada == 0:
+            print(f"    ... {ti + 1}/{ntime} tempos", flush=True)
+
+    gerados = []
+    for v, (nc, dv, outname, eh_3d) in writers.items():
+        p = nc.filepath()
+        nc.close()
+        tipo = "3D todos níveis/tempos" if eh_3d else "2D todos tempos"
+        print(f"  [OK] {outname:<14} {tipo} -> {os.path.basename(p)}", flush=True)
+        gerados.append(p)
+    return gerados
+
+
+# =========================================================================
 # Carregamento de acordo com o tipo de entrada
 # =========================================================================
 def carregar(entrada, forcar_grib=False, wgrib2="wgrib2"):
@@ -731,9 +876,17 @@ def main():
     ap.add_argument("--date", default=None,
                     help="Força a <data> do nome (AAAAMMDD). Padrão: 1º tempo do dado.")
     ap.add_argument("--grib", action="store_true",
-                    help="Trata o .ctl como GRIB2 (usa wgrib2), mesmo sem 'dtype grib2'.")
+                    help="Trata o .ctl como GRIB2, mesmo sem 'dtype grib2'.")
+    ap.add_argument("--grib-engine", choices=["cfgrib", "wgrib2"], default="cfgrib",
+                    help="Como ler GRIB2: 'cfgrib' (Python/eccodes, sem wgrib2, "
+                         "padrão) ou 'wgrib2' (precisa de wgrib2 com suporte NetCDF).")
     ap.add_argument("--wgrib2", default="wgrib2",
-                    help="Caminho do executável wgrib2 (para --grib).")
+                    help="Caminho do executável wgrib2 (só para --grib-engine wgrib2).")
+    ap.add_argument("--list-vars", action="store_true",
+                    help="Lista as variáveis do GRIB2 (nomes do cfgrib) e sai.")
+    ap.add_argument("--asname", default=None,
+                    help="Renomeia a variável de saída (só ao selecionar 1 var). "
+                         "Ex.: --vars tp --asname PREC -> PREC_<data>.nc")
     ap.add_argument("--complevel", type=int, default=1,
                     help="Nível de compressão zlib 0-9 (0=sem compressão, mais "
                          "rápido; 1=padrão rápido). Padrão: 1.")
@@ -773,18 +926,34 @@ def main():
         print("Convertendo variáveis (1 arquivo por variável):")
         gerados = converter_binario(info, args.outdir, data_str, apenas,
                                     complevel=args.complevel, jobs=args.jobs)
-    # ---- GRIB2: lê para memória e grava por variável ----
-    else:
-        if modo == "grib":
-            ds = read_grib_cfgrib(args.entrada)
-        else:
-            print(f"[GRIB2/.ctl] {os.path.basename(args.entrada)} — usando wgrib2")
+    # ---- GRIB2 descrito por .ctl ----
+    elif modo == "grib_ctl":
+        if args.list_vars:
+            listar_vars_grib2(info)
+            return
+        data_str = args.date or pd.Timestamp(info["times"][0]).strftime("%Y%m%d")
+        if args.grib_engine == "wgrib2":
+            print(f"[GRIB2/.ctl] {os.path.basename(args.entrada)} — wgrib2")
             ds = read_grib_via_ctl_wgrib2(info, wgrib2=args.wgrib2)
+            data_str = data_saida(ds, args.date)
+            print(f"\nData na nomenclatura: {data_str}")
+            print(f"Saída: {os.path.abspath(args.outdir)}\n")
+            gerados = salvar_por_variavel(ds, args.outdir, data_str, apenas,
+                                          complevel=args.complevel, jobs=args.jobs)
+        else:  # cfgrib (padrão, SEM wgrib2)
+            print(f"[GRIB2/.ctl] {os.path.basename(args.entrada)} — cfgrib streaming")
+            print(f"\nData na nomenclatura: {data_str}")
+            print(f"Saída: {os.path.abspath(args.outdir)}")
+            print(f"Compressão zlib nível {args.complevel}\n")
+            print("Convertendo variáveis (1 arquivo por variável):")
+            gerados = converter_grib2_cfgrib(info, args.outdir, data_str, apenas,
+                                             complevel=args.complevel, asname=args.asname)
+    # ---- arquivo .grib2 direto ----
+    else:
+        ds = read_grib_cfgrib(args.entrada)
         data_str = data_saida(ds, args.date)
         print(f"\nData na nomenclatura: {data_str}")
-        print(f"Saída: {os.path.abspath(args.outdir)}")
-        print(f"Compressão zlib nível {args.complevel}  |  jobs={args.jobs}\n")
-        print("Convertendo variáveis (1 arquivo por variável):")
+        print(f"Saída: {os.path.abspath(args.outdir)}\n")
         gerados = salvar_por_variavel(ds, args.outdir, data_str, apenas,
                                       complevel=args.complevel, jobs=args.jobs)
 

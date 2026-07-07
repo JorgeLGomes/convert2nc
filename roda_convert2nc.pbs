@@ -37,8 +37,14 @@ NCORES=256                       # processadores do nó
 VARS=""                          # ex.: "TP2M,U10M,V10M,PREC"; vazio = todas
 COMPLEVEL=1                      # 1 = padrão (bom p/ 3D); 0 = sem compressão (arquivos grandes)
 
-# Caminho do wgrib2 (usado só quando FORMATO=grib2). Confira com: which wgrib2
-WGRIB2="/lustre/app/wgrib2/deps/install/bin/wgrib2"
+# --- Opções de GRIB2 (usadas só quando FORMATO=grib2) ---
+GRIB_ENGINE="cfgrib"             # "cfgrib" (Python/eccodes, SEM wgrib2 — padrão)
+                                 # ou "wgrib2" (precisa de wgrib2 com suporte NetCDF)
+GRIB_ASNAME=""                   # renomeia a variável de saída (só 1 var). Ex.: "PREC"
+WGRIB2="/lustre/app/wgrib2/deps/install/bin/wgrib2"   # só se GRIB_ENGINE=wgrib2
+# Dica: descubra os nomes das variáveis do GRIB2 com:
+#   python convert2nc.py <um.ctl> --grib --list-vars
+# e então ponha o nome (do cfgrib) em VARS, e opcionalmente GRIB_ASNAME="PREC".
 
 # --- MODE=single: um .ctl, muitos processos por variável ---
 CTL="/lustre/projetos/grpeta/Team/jorge.gomes/Eta_install/out/ams_08km/binctl/2026010100/E03/Eta08_E03_2026010100.ctl"
@@ -60,12 +66,13 @@ INIT_TO=""                       # rodada final   (inclusive)
 VARG=()
 [ -n "$VARS" ] && VARG=(--vars "$VARS")
 
-# Flags de formato. Para GRIB2: usa wgrib2 (--grib). O caminho GRIB2 lê para a
-# memória (não é o streaming do binário), então paraleliza-se ENTRE arquivos
-# (JOBS_PER_FILE controla a concorrência) e mantém --jobs 1 por conversão.
+# Flags de formato. GRIB2 padrão = cfgrib (sem wgrib2), streaming tempo a tempo.
+# A paralelização é ENTRE arquivos (JOBS_PER_FILE); --jobs interno fica 1.
 FMT_FLAGS=()
 if [ "$FORMATO" = "grib2" ]; then
-    FMT_FLAGS=(--grib --wgrib2 "$WGRIB2")
+    FMT_FLAGS=(--grib --grib-engine "$GRIB_ENGINE")
+    [ "$GRIB_ENGINE" = "wgrib2" ] && FMT_FLAGS+=(--wgrib2 "$WGRIB2")
+    [ -n "$GRIB_ASNAME" ] && FMT_FLAGS+=(--asname "$GRIB_ASNAME")
 fi
 
 if [ "$MODE" = "single" ]; then
@@ -154,13 +161,17 @@ elif [ "$MODE" = "batch" ]; then
 
     # jobs internos por conversão: binário usa JOBS_PER_FILE; grib2 usa 1
     IJOBS="$JOBS_PER_FILE"; [ "$FORMATO" = "grib2" ] && IJOBS=1
-    export OUTROOT COMPLEVEL IJOBS VARS FORMATO WGRIB2
+    export OUTROOT COMPLEVEL IJOBS VARS FORMATO GRIB_ENGINE GRIB_ASNAME WGRIB2
     convert_one() {
         ctl="$1"
         init=$(basename "$ctl" | grep -oE '[0-9]{10}' | head -1)
         out="$OUTROOT/${init:-saida}"; mkdir -p "$out"
         flags=(--complevel "$COMPLEVEL" --jobs "$IJOBS")
-        [ "$FORMATO" = "grib2" ] && flags+=(--grib --wgrib2 "$WGRIB2")
+        if [ "$FORMATO" = "grib2" ]; then
+            flags+=(--grib --grib-engine "$GRIB_ENGINE")
+            [ "$GRIB_ENGINE" = "wgrib2" ] && flags+=(--wgrib2 "$WGRIB2")
+            [ -n "$GRIB_ASNAME" ] && flags+=(--asname "$GRIB_ASNAME")
+        fi
         [ -n "${VARS:-}" ] && flags+=(--vars "$VARS")
         echo "[$(date +%T)] início $init -> $out"
         python convert2nc.py "$ctl" -o "$out" "${flags[@]}" \
