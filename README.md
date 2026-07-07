@@ -50,3 +50,26 @@ python convert2nc.py entrada.ctl -o saida/ --vars tp2m,temp,uvel --date 20260707
 | `--date`      | Força a `<data>` do nome (`AAAAMMDD`). Padrão: 1º tempo do dado. |
 | `--grib`      | Trata o `.ctl` como GRIB2 (usa `wgrib2`) mesmo sem `dtype grib2`.|
 | `--wgrib2`    | Caminho do executável `wgrib2` (para `--grib`).                  |
+| `--complevel` | Nível de compressão zlib 0–9 (`0`=sem compressão, mais rápido). Padrão: `1`. |
+| `--jobs/-j`   | Nº de processos para gravar variáveis em paralelo. Padrão: `1`.  |
+
+## Desempenho
+
+O leitor do binário GrADS usa `numpy.memmap` com leitura em bloco (uma única
+abertura por arquivo e fatiamento vetorizado por variável), em vez de ler campo
+a campo. O ganho é maior em sistemas de arquivos de rede (ex.: Lustre), onde
+abrir arquivos é caro.
+
+O gargalo costuma ser a **escrita compactada**. Ajuste conforme a necessidade:
+
+- `--complevel 1` (padrão): bom equilíbrio; em campos meteorológicos (suaves)
+  comprime quase como o nível 4 gastando muito menos tempo.
+- `--complevel 0`: escrita muito mais rápida (arquivos maiores) — útil quando há
+  espaço em disco sobrando ou os `.nc` são intermediários.
+- `--jobs N`: grava N variáveis em paralelo (≈ nº de variáveis). ~2x com 4 jobs.
+
+Exemplo rápido (sem compressão + paralelo):
+
+```bash
+python convert2nc.py entrada.ctl -o saida/ --complevel 0 --jobs 4
+```

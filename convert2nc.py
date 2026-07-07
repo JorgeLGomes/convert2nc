@@ -248,39 +248,79 @@ def read_grads_binary(info, wanted=None):
     if not sel:
         raise RuntimeError("Nenhuma variável selecionada existe no .ctl.")
 
-    # Fortran 'sequential': cada registro tem 4 bytes de marca antes e depois
-    def read_field(f, field_index):
-        if seq:
-            # marca(4) + dados(fld*4) + marca(4) por registro 2D
-            f.seek(field_index * (fld * 4 + 8) + 4)
-        else:
-            f.seek(field_index * fld * 4)
-        a = np.fromfile(f, dtype=dtype, count=fld)
-        if a.size < fld:                       # arquivo truncado
-            a = np.concatenate([a, np.full(fld - a.size, np.nan, dtype="f4")])
-        a = a.reshape(ny, nx).astype("f4")
-        a = np.where(a == undef, np.nan, a)
-        if yrev:
-            a = a[::-1, :]
-        return a
+    ntime = len(times)
+    sel_names = [v[0] for v in sel]
+    # cubos de saída (preenchidos com NaN -> robusto a arquivo truncado)
+    cubos = {name: np.full((ntime, nfields_var[name], ny, nx), np.nan, dtype="f4")
+             for name in sel_names}
 
-    data_vars = {}
-    for (name, nlev, units, desc) in sel:
-        k = nfields_var[name]
-        eh_3d = k > 1
-        cubo = np.full((len(times), k, ny, nx), np.nan, dtype="f4")
-        for ti, vt in enumerate(times):
-            if info["template"]:
-                fn = _tmpl_name(info["dset"], vt)
-                base_field = offsets[name]       # offset dentro do arquivo do tempo
+    def _preencher_bloco(block, ti):
+        """block: (nblk, fields_por_arquivo, ny, nx) OU (fields, ny, nx) p/ 1 tempo.
+        Copia, de forma VETORIZADA, o recorte de cada variável para seu cubo."""
+        um_tempo = (block.ndim == 3)
+        for name in sel_names:
+            off, k = offsets[name], nfields_var[name]
+            if um_tempo:
+                disp = min(k, max(0, block.shape[0] - off))
+                if disp > 0:
+                    cubos[name][ti, :disp] = block[off:off + disp].astype("f4")
             else:
-                fn = info["dset"]
-                base_field = ti * fields_per_time + offsets[name]
+                disp = min(k, max(0, block.shape[1] - off))
+                nb = block.shape[0]
+                if disp > 0:
+                    cubos[name][:nb, :disp] = block[:, off:off + disp].astype("f4")
+
+    if seq:
+        # Fortran 'sequential' (raro): marca(4)+dados+marca(4) por registro 2D.
+        # Mantém leitura por campo (com bounds), mas 1 abertura por arquivo.
+        rec = fld * 4 + 8
+        for ti, vt in enumerate(times):
+            fn = _tmpl_name(info["dset"], vt) if info["template"] else info["dset"]
             if not os.path.exists(fn):
                 continue
+            base = 0 if info["template"] else ti * fields_per_time
             with open(fn, "rb") as f:
-                for z in range(k):
-                    cubo[ti, z] = read_field(f, base_field + z)
+                for name in sel_names:
+                    off, k = offsets[name], nfields_var[name]
+                    for z in range(k):
+                        f.seek((base + off + z) * rec + 4)
+                        a = np.fromfile(f, dtype=dtype, count=fld)
+                        if a.size == fld:
+                            cubos[name][ti, z] = a.reshape(ny, nx).astype("f4")
+    elif info["template"]:
+        # 1 arquivo por tempo: memmap + fatiamento vetorizado, 1 abertura/arquivo
+        for ti, vt in enumerate(times):
+            fn = _tmpl_name(info["dset"], vt)
+            if not os.path.exists(fn):
+                continue
+            mm = np.memmap(fn, dtype=dtype, mode="r")
+            navail = mm.size // fld
+            nblk = min(navail, fields_per_time)
+            if nblk > 0:
+                _preencher_bloco(mm[:nblk * fld].reshape(nblk, ny, nx), ti)
+            del mm
+    else:
+        # arquivo único com todos os tempos: 1 memmap + 1 reshape + fatias
+        fn = info["dset"]
+        if os.path.exists(fn):
+            mm = np.memmap(fn, dtype=dtype, mode="r")
+            per_time = fields_per_time * fld
+            nt_full = min(ntime, mm.size // per_time)
+            if nt_full > 0:
+                block = mm[:nt_full * per_time].reshape(nt_full, fields_per_time, ny, nx)
+                _preencher_bloco(block, 0)
+            del mm
+
+    # pós-processamento VETORIZADO por cubo (undef, yrev, zrev) + DataArray
+    data_vars = {}
+    for (name, nlev, units, desc) in sel:
+        cubo = cubos[name]
+        if np.isfinite(undef):
+            cubo[cubo == np.float32(undef)] = np.nan
+        if yrev:
+            cubo = cubo[:, :, ::-1, :]
+        k = nfields_var[name]
+        eh_3d = k > 1
         if zrev and eh_3d:
             cubo = cubo[:, ::-1, :, :]
         if eh_3d:
@@ -385,8 +425,26 @@ def data_saida(ds, forcado=None):
     return datetime.now().strftime("%Y%m%d")
 
 
-def salvar_por_variavel(ds, outdir, data_str, apenas=None):
-    """Salva CADA variável em um NetCDF separado: <var>_<data>.nc."""
+def _escrever_uma(args):
+    """Worker (picklável) que grava UMA variável em NetCDF. Retorna (var, path, dims, eh_3d)."""
+    ds_var, var, caminho, complevel = args
+    enc = {var: {}}
+    if complevel and complevel > 0:
+        enc[var].update(zlib=True, complevel=int(complevel))
+    if np.issubdtype(ds_var[var].dtype, np.floating):
+        enc[var]["_FillValue"] = np.float32(9.969209968386869e36)
+    ds_var.to_netcdf(caminho, format="NETCDF4", encoding=enc)
+    da = ds_var[var]
+    dims = " x ".join(f"{d}={ds_var.sizes[d]}" for d in da.dims)
+    return var, caminho, dims, tem_nivel(da)
+
+
+def salvar_por_variavel(ds, outdir, data_str, apenas=None, complevel=1, jobs=1):
+    """Salva CADA variável em um NetCDF separado: <var>_<data>.nc.
+
+    complevel: nível zlib (0 = sem compressão, mais rápido; 1 = rápido/padrão).
+    jobs:      nº de processos para gravar variáveis em paralelo (1 = sequencial).
+    """
     os.makedirs(outdir, exist_ok=True)
     variaveis = list(ds.data_vars)
     if apenas:
@@ -399,20 +457,28 @@ def salvar_por_variavel(ds, outdir, data_str, apenas=None):
     if not variaveis:
         sys.exit("Nenhuma variável para salvar. Verifique a entrada / --vars.")
 
-    gerados = []
+    tarefas = []
     for var in variaveis:
-        da = ds[var]
-        eh_3d = tem_nivel(da)
-        ds_var = da.to_dataset(name=var)
-        enc = {var: {"zlib": True, "complevel": 4}}
-        if np.issubdtype(da.dtype, np.floating):
-            enc[var]["_FillValue"] = np.float32(9.969209968386869e36)
         caminho = os.path.join(outdir, f"{var}_{data_str}.nc")
-        ds_var.to_netcdf(caminho, format="NETCDF4", encoding=enc)
-        dims = " x ".join(f"{d}={ds_var.sizes[d]}" for d in da.dims)
+        tarefas.append((ds[var].to_dataset(name=var), var, caminho, complevel))
+
+    def _log(res):
+        var, caminho, dims, eh_3d = res
         tipo = "3D todos níveis/tempos" if eh_3d else "2D todos tempos"
         print(f"  [OK] {var:<12} {tipo:<24} ({dims}) -> {os.path.basename(caminho)}")
-        gerados.append(caminho)
+
+    gerados = []
+    if jobs and jobs > 1 and len(tarefas) > 1:
+        from concurrent.futures import ProcessPoolExecutor
+        with ProcessPoolExecutor(max_workers=jobs) as ex:
+            for res in ex.map(_escrever_uma, tarefas):
+                _log(res)
+                gerados.append(res[1])
+    else:
+        for t in tarefas:
+            res = _escrever_uma(t)
+            _log(res)
+            gerados.append(res[1])
     return gerados
 
 
@@ -458,20 +524,30 @@ def main():
                     help="Trata o .ctl como GRIB2 (usa wgrib2), mesmo sem 'dtype grib2'.")
     ap.add_argument("--wgrib2", default="wgrib2",
                     help="Caminho do executável wgrib2 (para --grib).")
+    ap.add_argument("--complevel", type=int, default=1,
+                    help="Nível de compressão zlib 0-9 (0=sem compressão, mais "
+                         "rápido; 1=padrão rápido). Padrão: 1.")
+    ap.add_argument("--jobs", "-j", type=int, default=1,
+                    help="Nº de processos para gravar variáveis em paralelo "
+                         "(padrão: 1). Use ~nº de variáveis para acelerar a escrita.")
     args = ap.parse_args()
 
     if not os.path.exists(args.entrada):
         sys.exit(f"Arquivo de entrada não encontrado: {args.entrada}")
 
+    t0 = datetime.now()
     ds = carregar(args.entrada, forcar_grib=args.grib, wgrib2=args.wgrib2)
     data_str = data_saida(ds, args.date)
     apenas = args.vars.split(",") if args.vars else None
 
     print(f"\nData na nomenclatura: {data_str}")
-    print(f"Saída: {os.path.abspath(args.outdir)}\n")
+    print(f"Saída: {os.path.abspath(args.outdir)}")
+    print(f"Compressão zlib nível {args.complevel}  |  jobs={args.jobs}\n")
     print("Convertendo variáveis (1 arquivo por variável):")
-    gerados = salvar_por_variavel(ds, args.outdir, data_str, apenas)
-    print(f"\nConcluído. {len(gerados)} arquivo(s) NetCDF gerado(s).")
+    gerados = salvar_por_variavel(ds, args.outdir, data_str, apenas,
+                                  complevel=args.complevel, jobs=args.jobs)
+    dt = (datetime.now() - t0).total_seconds()
+    print(f"\nConcluído em {dt:.1f}s. {len(gerados)} arquivo(s) NetCDF gerado(s).")
 
 
 if __name__ == "__main__":
