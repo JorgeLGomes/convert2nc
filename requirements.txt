@@ -1,0 +1,16 @@
+# Dependências Python do conversor Convert2nc (Eta -> NetCDF)
+# Instalação:  pip install -r requirements.txt
+
+numpy
+pandas
+xarray
+netCDF4          # escrita dos arquivos .nc (engine NETCDF4)
+
+# --- Opcional: leitura de GRIB2 direto (.grib2) sem wgrib2 ---
+# Requer a biblioteca de sistema ECCODES. Via pip pode não bastar em alguns
+# sistemas; nesse caso use o ambiente conda (environment.yml), que já traz o
+# eccodes. Deixe comentado se for usar só binário GrADS ou --grib via wgrib2.
+# cfgrib
+
+# Ferramenta de sistema (NÃO via pip — precisa estar no PATH):
+#   wgrib2  -> só para converter GRIB2 descrito por .ctl (opção --grib)

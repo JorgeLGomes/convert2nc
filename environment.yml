@@ -1,0 +1,22 @@
+# Ambiente conda para o conversor Convert2nc (Eta -> NetCDF)
+# Recomendado quando precisar ler GRIB2 direto (.grib2): traz o eccodes,
+# que o cfgrib exige, sem compilação manual.
+#
+# Criar:      conda env create -f environment.yml
+# Ativar:     conda activate convert2nc
+# Atualizar:  conda env update -f environment.yml --prune
+#
+# Dica: use mamba (mais rápido) no lugar de conda, se tiver instalado.
+
+name: convert2nc
+channels:
+  - conda-forge
+dependencies:
+  - python>=3.9
+  - numpy
+  - pandas
+  - xarray
+  - netcdf4
+  - cfgrib          # leitura de GRIB2 direto (.grib2)
+  - eccodes         # backend GRIB exigido pelo cfgrib
+  # - wgrib2        # opcional: converter GRIB2 descrito por .ctl (--grib)
