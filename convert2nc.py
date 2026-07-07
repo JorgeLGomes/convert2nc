@@ -483,6 +483,178 @@ def salvar_por_variavel(ds, outdir, data_str, apenas=None, complevel=1, jobs=1):
 
 
 # =========================================================================
+# Conversão do BINÁRIO GrADS em modo STREAMING (tempo a tempo)
+# --------------------------------------------------------------------------
+# Grava cada variável direto em NetCDF, lendo um instante por vez. Memória fica
+# em ~uma fatia (não segura o dataset inteiro) e cada byte do binário é lido só
+# uma vez. Escala para domínios grandes (ex.: ams_08km 931x875 x 265 tempos) e
+# NÃO usa multiprocessing, evitando o limite de pickle de 4 GiB por variável 3D.
+# =========================================================================
+def _ordena_campos(var_list):
+    """offset (em campos 2D) e nº de campos de cada variável dentro de um tempo."""
+    offsets, nfields_var, fpt = {}, {}, 0
+    for (name, nlev, _u, _d) in var_list:
+        k = max(1, nlev)
+        offsets[name] = fpt
+        nfields_var[name] = k
+        fpt += k
+    return offsets, nfields_var, fpt
+
+
+def _ler_bloco_tempo(info, ti, mm, fpt):
+    """Retorna os campos 2D do instante ti como (n_campos, ny, nx) — view do memmap.
+
+    Abre 1 arquivo por tempo (template) ou fatia o memmap único (arquivo único).
+    Retorna None se o arquivo do tempo não existir.
+    """
+    nx, ny = info["nx"], info["ny"]
+    fld = nx * ny
+    dtype = ">f4" if info["byteswap"] else "<f4"
+    times = info["times"]
+    if info["template"]:
+        fn = _tmpl_name(info["dset"], times[ti])
+        if not os.path.exists(fn):
+            return None
+        m = np.memmap(fn, dtype=dtype, mode="r")
+        n = min(m.size // fld, fpt)
+        return m[:n * fld].reshape(n, ny, nx)
+    if info["sequential"]:
+        # Fortran sequential (raro): marca(4)+dados+marca(4) por registro 2D
+        rec = fld * 4 + 8
+        base = ti * fpt
+        out = np.full((fpt, ny, nx), np.nan, "f4")
+        with open(info["dset"], "rb") as f:
+            for j in range(fpt):
+                f.seek((base + j) * rec + 4)
+                a = np.fromfile(f, dtype=dtype, count=fld)
+                if a.size == fld:
+                    out[j] = a.reshape(ny, nx).astype("f4")
+        return out
+    # arquivo único com todos os tempos
+    per_time = fpt * fld
+    if mm is None or ti >= mm.size // per_time:
+        return None
+    return mm[ti * per_time:(ti + 1) * per_time].reshape(fpt, ny, nx)
+
+
+def converter_binario(info, outdir, data_str, wanted=None, complevel=1,
+                      progresso_cada=20):
+    """Converte o binário GrADS para NetCDF (1 arquivo por variável), tempo a tempo."""
+    import netCDF4
+    os.makedirs(outdir, exist_ok=True)
+    nx, ny = info["nx"], info["ny"]
+    undef = info["undef"]
+    yrev, zrev = info["yrev"], info["zrev"]
+    dtype = ">f4" if info["byteswap"] else "<f4"
+    lat = info["y0"] + np.arange(ny) * info["dy"]
+    lon = info["x0"] + np.arange(nx) * info["dx"]
+    levels = info["levels"]
+    times = info["times"]
+    ntime = len(times)
+    offsets, nfields_var, fpt = _ordena_campos(info["vars"])
+
+    # seleção de variáveis
+    sel = list(info["vars"])
+    if wanted:
+        wl = [w.strip().lower() for w in wanted]
+        sel = [v for v in info["vars"] if v[0].lower() in wl]
+        faltando = [w for w in wanted
+                    if w.strip().lower() not in [v[0].lower() for v in info["vars"]]]
+        if faltando:
+            print(f"  Aviso: variáveis ausentes e ignoradas: {faltando}", flush=True)
+    if not sel:
+        sys.exit("Nenhuma variável para converter. Verifique --vars.")
+
+    # memmap único (caso arquivo único)
+    mm = None
+    if not info["template"] and not info["sequential"] and os.path.exists(info["dset"]):
+        mm = np.memmap(info["dset"], dtype=dtype, mode="r")
+
+    # cria um writer NetCDF por variável (todos abertos ao mesmo tempo)
+    fillv = np.float32(9.969209968386869e36)
+    writers = {}
+    for (name, nlev, units, desc) in sel:
+        k = nfields_var[name]
+        eh_3d = k > 1
+        path = os.path.join(outdir, f"{name}_{data_str}.nc")
+        nc = netCDF4.Dataset(path, "w", format="NETCDF4")
+        nc.createDimension("time", ntime)
+        nc.createDimension("lat", ny)
+        nc.createDimension("lon", nx)
+        t0 = pd.Timestamp(times[0])
+        tv = nc.createVariable("time", "f8", ("time",))
+        tv.units = f"hours since {t0.strftime('%Y-%m-%d %H:%M:%S')}"
+        tv.calendar = "standard"
+        tv[:] = [(pd.Timestamp(t) - t0).total_seconds() / 3600.0 for t in times]
+        latv = nc.createVariable("lat", "f4", ("lat",))
+        latv[:] = lat
+        latv.units = "degrees_north"
+        latv.long_name = "latitude"
+        lonv = nc.createVariable("lon", "f4", ("lon",))
+        lonv[:] = lon
+        lonv.units = "degrees_east"
+        lonv.long_name = "longitude"
+        if eh_3d:
+            nc.createDimension("lev", k)
+            levv = nc.createVariable("lev", "f4", ("lev",))
+            levv[:] = levels[:k]
+            levv.long_name = "level"
+            dims = ("time", "lev", "lat", "lon")
+        else:
+            dims = ("time", "lat", "lon")
+        kw = dict(fill_value=fillv)
+        if complevel and complevel > 0:
+            kw.update(zlib=True, complevel=int(complevel))
+        dv = nc.createVariable(name, "f4", dims, **kw)
+        if units:
+            dv.units = units
+        if desc:
+            dv.long_name = desc
+        if info.get("title"):
+            nc.title = info["title"]
+        writers[name] = (nc, dv, offsets[name], k, eh_3d)
+
+    print(f"  {len(writers)} variável(is) x {ntime} tempos — gravando tempo a tempo...",
+          flush=True)
+
+    # varredura temporal única (cada byte lido 1x; memória ~ uma fatia)
+    for ti in range(ntime):
+        block = _ler_bloco_tempo(info, ti, mm, fpt)
+        if block is not None:
+            for name, (nc, dv, off, k, eh_3d) in writers.items():
+                nb = min(k, max(0, block.shape[0] - off))
+                if nb <= 0:
+                    continue
+                sub = np.array(block[off:off + nb]).astype("f4")
+                if np.isfinite(undef):
+                    sub[sub == np.float32(undef)] = np.nan
+                if yrev:
+                    sub = sub[:, ::-1, :]
+                if zrev and eh_3d:
+                    sub = sub[::-1]
+                if eh_3d:
+                    dv[ti, :nb, :, :] = sub
+                else:
+                    dv[ti, :, :] = sub[0]
+        if progresso_cada and (ti + 1) % progresso_cada == 0:
+            print(f"    ... {ti + 1}/{ntime} tempos", flush=True)
+
+    gerados = []
+    for name, (nc, dv, off, k, eh_3d) in writers.items():
+        path = nc.filepath()
+        nc.close()
+        tipo = "3D todos níveis/tempos" if eh_3d else "2D todos tempos"
+        dimtxt = (f"time={ntime} x lev={k} x lat={ny} x lon={nx}" if eh_3d
+                  else f"time={ntime} x lat={ny} x lon={nx}")
+        print(f"  [OK] {name:<12} {tipo:<24} ({dimtxt}) -> {os.path.basename(path)}",
+              flush=True)
+        gerados.append(path)
+    if mm is not None:
+        del mm
+    return gerados
+
+
+# =========================================================================
 # Carregamento de acordo com o tipo de entrada
 # =========================================================================
 def carregar(entrada, forcar_grib=False, wgrib2="wgrib2"):
@@ -529,23 +701,57 @@ def main():
                          "rápido; 1=padrão rápido). Padrão: 1.")
     ap.add_argument("--jobs", "-j", type=int, default=1,
                     help="Nº de processos para gravar variáveis em paralelo "
-                         "(padrão: 1). Use ~nº de variáveis para acelerar a escrita.")
+                         "(só GRIB2; o binário grava tempo a tempo em 1 passo).")
     args = ap.parse_args()
 
     if not os.path.exists(args.entrada):
         sys.exit(f"Arquivo de entrada não encontrado: {args.entrada}")
 
     t0 = datetime.now()
-    ds = carregar(args.entrada, forcar_grib=args.grib, wgrib2=args.wgrib2)
-    data_str = data_saida(ds, args.date)
     apenas = args.vars.split(",") if args.vars else None
+    ext = os.path.splitext(args.entrada)[1].lower()
 
-    print(f"\nData na nomenclatura: {data_str}")
-    print(f"Saída: {os.path.abspath(args.outdir)}")
-    print(f"Compressão zlib nível {args.complevel}  |  jobs={args.jobs}\n")
-    print("Convertendo variáveis (1 arquivo por variável):")
-    gerados = salvar_por_variavel(ds, args.outdir, data_str, apenas,
-                                  complevel=args.complevel, jobs=args.jobs)
+    # ---- descobre o tipo de entrada ----
+    info = None
+    if ext in (".grb2", ".grib2", ".grb", ".grib"):
+        modo = "grib"
+    elif ext == ".ctl":
+        info = parse_ctl(args.entrada)
+        modo = "grib_ctl" if (info["is_grib"] or args.grib) else "bin"
+    else:
+        cand = os.path.splitext(args.entrada)[0] + ".ctl"
+        if not os.path.exists(cand):
+            sys.exit(f"Entrada não reconhecida: {args.entrada}. Passe .ctl ou .grib2.")
+        info = parse_ctl(cand)
+        modo = "bin"
+
+    # ---- BINÁRIO: streaming tempo a tempo (memória mínima, sem pickle) ----
+    if modo == "bin":
+        data_str = args.date or pd.Timestamp(info["times"][0]).strftime("%Y%m%d")
+        print(f"[GrADS/binário] {os.path.basename(args.entrada)} — streaming tempo a tempo")
+        print(f"\nData na nomenclatura: {data_str}")
+        print(f"Saída: {os.path.abspath(args.outdir)}")
+        print(f"Compressão zlib nível {args.complevel}\n")
+        if args.jobs > 1:
+            print("  (--jobs é ignorado no binário: gravação já é 1 passo eficiente)\n")
+        print("Convertendo variáveis (1 arquivo por variável):")
+        gerados = converter_binario(info, args.outdir, data_str, apenas,
+                                    complevel=args.complevel)
+    # ---- GRIB2: lê para memória e grava por variável ----
+    else:
+        if modo == "grib":
+            ds = read_grib_cfgrib(args.entrada)
+        else:
+            print(f"[GRIB2/.ctl] {os.path.basename(args.entrada)} — usando wgrib2")
+            ds = read_grib_via_ctl_wgrib2(info, wgrib2=args.wgrib2)
+        data_str = data_saida(ds, args.date)
+        print(f"\nData na nomenclatura: {data_str}")
+        print(f"Saída: {os.path.abspath(args.outdir)}")
+        print(f"Compressão zlib nível {args.complevel}  |  jobs={args.jobs}\n")
+        print("Convertendo variáveis (1 arquivo por variável):")
+        gerados = salvar_por_variavel(ds, args.outdir, data_str, apenas,
+                                      complevel=args.complevel, jobs=args.jobs)
+
     dt = (datetime.now() - t0).total_seconds()
     print(f"\nConcluído em {dt:.1f}s. {len(gerados)} arquivo(s) NetCDF gerado(s).")
 

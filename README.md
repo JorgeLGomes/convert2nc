@@ -51,25 +51,32 @@ python convert2nc.py entrada.ctl -o saida/ --vars tp2m,temp,uvel --date 20260707
 | `--grib`      | Trata o `.ctl` como GRIB2 (usa `wgrib2`) mesmo sem `dtype grib2`.|
 | `--wgrib2`    | Caminho do executável `wgrib2` (para `--grib`).                  |
 | `--complevel` | Nível de compressão zlib 0–9 (`0`=sem compressão, mais rápido). Padrão: `1`. |
-| `--jobs/-j`   | Nº de processos para gravar variáveis em paralelo. Padrão: `1`.  |
+| `--jobs/-j`   | Processos p/ gravar variáveis em paralelo — **só GRIB2**. Padrão: `1`. |
 
-## Desempenho
+## Desempenho e memória
 
-O leitor do binário GrADS usa `numpy.memmap` com leitura em bloco (uma única
-abertura por arquivo e fatiamento vetorizado por variável), em vez de ler campo
-a campo. O ganho é maior em sistemas de arquivos de rede (ex.: Lustre), onde
-abrir arquivos é caro.
+O binário GrADS é convertido em **streaming, tempo a tempo**: o script abre cada
+arquivo de tempo uma vez, lê a fatia daquele instante com `numpy.memmap` e a
+grava direto em cada NetCDF. Isso significa:
 
-O gargalo costuma ser a **escrita compactada**. Ajuste conforme a necessidade:
+- **Memória mínima** — nunca segura o dataset inteiro na RAM, apenas ~uma fatia
+  por vez. Escala para domínios grandes (ex.: ams_08km 931×875 × 265 tempos, com
+  todas as variáveis 3D e todos os níveis).
+- **Cada byte lido uma vez** — leitura sequencial, ótima para o Lustre.
+- **Sem `multiprocessing` no binário** — evita o limite de pickle de 4 GiB por
+  variável 3D (que causava `OverflowError` com `--jobs`). Por isso `--jobs` é
+  ignorado no binário; ele já grava em um único passo eficiente.
 
-- `--complevel 1` (padrão): bom equilíbrio; em campos meteorológicos (suaves)
-  comprime quase como o nível 4 gastando muito menos tempo.
-- `--complevel 0`: escrita muito mais rápida (arquivos maiores) — útil quando há
-  espaço em disco sobrando ou os `.nc` são intermediários.
-- `--jobs N`: grava N variáveis em paralelo (≈ nº de variáveis). ~2x com 4 jobs.
+Compressão (`--complevel`):
 
-Exemplo rápido (sem compressão + paralelo):
+- `--complevel 1` (padrão): recomendado. Em campos meteorológicos (suaves)
+  comprime bem e é rápido. **Use este para variáveis 3D** — no nível 0 os `.nc`
+  3D ficam enormes (uma 3D com muitos níveis × 265 tempos pode passar de 10 GB).
+- `--complevel 0`: escrita mais rápida, arquivos maiores — ok para 2D ou `.nc`
+  intermediários com espaço em disco sobrando.
+
+Para reduzir tempo/disco, converta só as variáveis necessárias:
 
 ```bash
-python convert2nc.py entrada.ctl -o saida/ --complevel 0 --jobs 4
+python convert2nc.py entrada.ctl -o saida/ --vars TP2M,U10M,V10M,PREC
 ```
