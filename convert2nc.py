@@ -706,49 +706,100 @@ def converter_binario(info, outdir, data_str, wanted=None, complevel=1, jobs=1,
 # Lê o .ctl (template + tempos) e abre cada GRIB2 por-tempo com cfgrib/eccodes,
 # gravando cada variável direto em NetCDF (memória mínima). Não requer wgrib2.
 # =========================================================================
-def _grib2_descobre(fn):
-    """Descobre as variáveis de um GRIB2 (open_datasets, chamado 1x).
-
-    Retorna {nome: dict(shortName, typeOfLevel, lat, lon, lev)}. Usado só para
-    listar/descobrir a grade — a LEITURA em si usa _grib2_le (filter_by_keys),
-    que lê apenas a variável pedida (muito mais rápido).
-    """
-    import cfgrib
-    meta = {}
-    for ds in cfgrib.open_datasets(fn, backend_kwargs={"indexpath": ""}):
-        if "latitude" not in ds.coords or "longitude" not in ds.coords:
-            continue
-        lat = np.asarray(ds["latitude"].values)
-        lon = np.asarray(ds["longitude"].values)
-        for v in ds.data_vars:
-            da = ds[v]
-            if da.dims[-2:] != ("latitude", "longitude"):
-                continue
-            extra = list(da.dims[:-2])
-            if len(extra) > 1:
-                continue
-            lev = (extra[0], np.atleast_1d(da[extra[0]].values)) if extra else None
-            meta[str(v)] = dict(
-                shortName=da.attrs.get("GRIB_shortName", str(v)),
-                typeOfLevel=da.attrs.get("GRIB_typeOfLevel"),
-                lat=lat, lon=lon, lev=lev)
-    return meta
+def _grib2_inventario(fn):
+    """Inventário do GRIB2 via eccodes (1 passada): {shortName: dict(typeOfLevel,
+    levels, name)}. Rápido — lê só chaves de cabeçalho, não decodifica valores."""
+    from eccodes import codes_grib_new_from_file, codes_get, codes_release
+    inv = {}
+    with open(fn, "rb") as f:
+        while True:
+            gid = codes_grib_new_from_file(f)
+            if gid is None:
+                break
+            try:
+                sn = codes_get(gid, "shortName")
+                tol = codes_get(gid, "typeOfLevel")
+                lev = codes_get(gid, "level")
+                try:
+                    nm = codes_get(gid, "name")
+                except Exception:
+                    nm = sn
+                d = inv.setdefault(sn, dict(typeOfLevel=tol, levels=set(), name=nm))
+                d["levels"].add(lev)
+            finally:
+                codes_release(gid)
+    for d in inv.values():
+        d["levels"] = sorted(d["levels"])
+    return inv
 
 
-def _grib2_le(fn, shortname, typeoflevel):
-    """Lê UMA variável de um GRIB2 via filter_by_keys (decodifica só ela)."""
-    fbk = {"shortName": shortname}
-    if typeoflevel:
-        fbk["typeOfLevel"] = typeoflevel
-    try:
-        ds = xr.open_dataset(fn, engine="cfgrib",
-                             backend_kwargs={"indexpath": "", "filter_by_keys": fbk})
-    except Exception:
-        return None
-    dvs = [v for v in ds.data_vars if ds[v].dims[-2:] == ("latitude", "longitude")]
-    if not dvs:
-        return None
-    return ds[dvs[0]].values.astype("f4")
+def _grib2_grade(fn, shortname):
+    """lat (norte->sul) e lon (oeste->leste) da 1ª mensagem de shortName (eccodes)."""
+    from eccodes import (codes_grib_new_from_file, codes_get, codes_get_array,
+                         codes_release)
+    with open(fn, "rb") as f:
+        while True:
+            gid = codes_grib_new_from_file(f)
+            if gid is None:
+                return None
+            try:
+                if codes_get(gid, "shortName") != shortname:
+                    continue
+                ni = codes_get(gid, "Ni")
+                nj = codes_get(gid, "Nj")
+                try:
+                    lats = np.asarray(codes_get_array(gid, "distinctLatitudes"), float)
+                    lons = np.asarray(codes_get_array(gid, "distinctLongitudes"), float)
+                except Exception:
+                    la1 = codes_get(gid, "latitudeOfFirstGridPointInDegrees")
+                    la2 = codes_get(gid, "latitudeOfLastGridPointInDegrees")
+                    lo1 = codes_get(gid, "longitudeOfFirstGridPointInDegrees")
+                    lo2 = codes_get(gid, "longitudeOfLastGridPointInDegrees")
+                    lats = np.linspace(la1, la2, nj)
+                    lons = np.linspace(lo1, lo2, ni)
+                if lats[0] < lats[-1]:
+                    lats = lats[::-1]
+                if lons[0] > lons[-1]:
+                    lons = lons[::-1]
+                return lats, lons
+            finally:
+                codes_release(gid)
+
+
+def _grib2_le_ecc(fn, shortname, typeoflevel, levels):
+    """Lê UMA variável de um GRIB2 via eccodes (1 passada). 2D -> (nj,ni);
+    3D -> (nlev,nj,ni) na ordem de `levels`. Normaliza norte->sul, oeste->leste."""
+    from eccodes import (codes_grib_new_from_file, codes_get, codes_get_values,
+                         codes_release)
+    lev_idx = {lv: i for i, lv in enumerate(levels)} if levels else None
+    out = None
+    with open(fn, "rb") as f:
+        while True:
+            gid = codes_grib_new_from_file(f)
+            if gid is None:
+                break
+            try:
+                if codes_get(gid, "shortName") != shortname:
+                    continue
+                if typeoflevel and codes_get(gid, "typeOfLevel") != typeoflevel:
+                    continue
+                ni = codes_get(gid, "Ni")
+                nj = codes_get(gid, "Nj")
+                a = codes_get_values(gid).reshape(nj, ni).astype("f4")
+                if codes_get(gid, "jScansPositively"):
+                    a = a[::-1, :]
+                if codes_get(gid, "iScansNegatively"):
+                    a = a[:, ::-1]
+                if levels is None:
+                    return a
+                if out is None:
+                    out = np.full((len(levels), nj, ni), np.nan, "f4")
+                lv = codes_get(gid, "level")
+                if lv in lev_idx:
+                    out[lev_idx[lv]] = a
+            finally:
+                codes_release(gid)
+    return out
 
 
 def _grib2_primeiro_arquivo(info):
@@ -765,13 +816,12 @@ def listar_vars_grib2(info):
     f0 = _grib2_primeiro_arquivo(info)
     if not f0:
         sys.exit("Nenhum arquivo GRIB2 encontrado (confira DSET/template do .ctl).")
-    meta = _grib2_descobre(f0)
+    inv = _grib2_inventario(f0)
     print(f"Variáveis no GRIB2 ({os.path.basename(f0)}):")
-    for v, m in meta.items():
-        lev = m["lev"]
-        tipo = f"3D ({lev[0]}={len(lev[1])})" if lev is not None else "2D"
-        print(f"  {v:<18} {tipo:<16} grade {len(m['lat'])}x{len(m['lon'])}  "
-              f"(shortName={m['shortName']}, level={m['typeOfLevel']})")
+    for sn, d in inv.items():
+        nlev = len(d["levels"])
+        tipo = f"3D ({d['typeOfLevel']}={nlev} níveis)" if nlev > 1 else "2D"
+        print(f"  {sn:<14} {tipo:<20} nível={d['typeOfLevel']:<16} {d.get('name', '')}")
 
 
 def converter_grib2_cfgrib(info, outdir, data_str, wanted=None, complevel=1,
@@ -786,28 +836,34 @@ def converter_grib2_cfgrib(info, outdir, data_str, wanted=None, complevel=1,
     f0 = _grib2_primeiro_arquivo(info)
     if not f0:
         sys.exit("Nenhum arquivo GRIB2 encontrado (confira DSET/template do .ctl).")
-    meta = _grib2_descobre(f0)          # descoberta 1x (grade, shortName, nível)
-    todos = list(meta.keys())
+    inv = _grib2_inventario(f0)          # inventário 1x (shortName, nível, tipo)
+    todos = list(inv.keys())
 
     sel = todos
     if wanted:
         wl = [w.strip().lower() for w in wanted]
-        sel = [v for v in todos if v.lower() in wl]
+        sel = [sn for sn in todos if sn.lower() in wl]
         if not sel:
             sys.exit(f"Variáveis {wanted} não encontradas. Disponíveis: {todos}\n"
-                     f"(use --list-vars para ver os nomes do cfgrib)")
+                     f"(use --list-vars para ver os nomes)")
     if asname and len(sel) != 1:
         print("  Aviso: --asname só se aplica ao selecionar 1 variável; ignorado.")
         asname = None
 
     fillv = np.float32(9.969209968386869e36)
     writers = {}
-    for v in sel:
-        m = meta[v]
-        lat, lon, lev = m["lat"], m["lon"], m["lev"]
+    for sn in sel:
+        d = inv[sn]
+        tol = d["typeOfLevel"]
+        eh_3d = len(d["levels"]) > 1
+        levels = d["levels"] if eh_3d else None
+        g = _grib2_grade(f0, sn)
+        if g is None:
+            print(f"  Aviso: grade não obtida para {sn}; pulando.")
+            continue
+        lat, lon = g
         ny, nx = len(lat), len(lon)
-        eh_3d = lev is not None
-        outname = asname if (asname and len(sel) == 1) else v
+        outname = asname if (asname and len(sel) == 1) else sn
         path = os.path.join(outdir, f"{outname}_{data_str}.nc")
         nc = netCDF4.Dataset(path, "w", format="NETCDF4")
         nc.createDimension("time", ntime)
@@ -825,11 +881,11 @@ def converter_grib2_cfgrib(info, outdir, data_str, wanted=None, complevel=1,
         lonv[:] = lon
         lonv.units = "degrees_east"
         if eh_3d:
-            k = len(lev[1])
+            k = len(levels)
             nc.createDimension("lev", k)
             levv = nc.createVariable("lev", "f4", ("lev",))
-            levv[:] = np.asarray(lev[1], "f4")
-            levv.long_name = str(lev[0])
+            levv[:] = np.asarray(levels, "f4")
+            levv.long_name = str(tol)
             dims = ("time", "lev", "lat", "lon")
             chunk = (1, 1, ny, nx)
         else:
@@ -839,16 +895,16 @@ def converter_grib2_cfgrib(info, outdir, data_str, wanted=None, complevel=1,
         if complevel and complevel > 0:
             kw.update(zlib=True, complevel=int(complevel), chunksizes=chunk)
         dv = nc.createVariable(outname, "f4", dims, **kw)
-        writers[v] = (nc, dv, outname, eh_3d, m["shortName"], m["typeOfLevel"])
+        writers[sn] = (nc, dv, outname, eh_3d, tol, levels)
 
-    print(f"  {len(writers)} variável(is) x {ntime} tempos (GRIB2/cfgrib, "
-          f"leitura por filter_by_keys)...", flush=True)
+    print(f"  {len(writers)} variável(is) x {ntime} tempos (GRIB2/eccodes)...",
+          flush=True)
     for ti, vt in enumerate(times):
         fn = _tmpl_name(dset, vt) if info.get("template", True) else dset
         if not os.path.exists(fn):
             continue
-        for v, (nc, dv, outname, eh_3d, sn, tol) in writers.items():
-            arr = _grib2_le(fn, sn, tol)       # decodifica SÓ esta variável
+        for sn, (nc, dv, outname, eh_3d, tol, levels) in writers.items():
+            arr = _grib2_le_ecc(fn, sn, tol, levels)   # 1 passada, só esta variável
             if arr is None:
                 continue
             if eh_3d:
@@ -859,7 +915,7 @@ def converter_grib2_cfgrib(info, outdir, data_str, wanted=None, complevel=1,
             print(f"    ... {ti + 1}/{ntime} tempos", flush=True)
 
     gerados = []
-    for v, (nc, dv, outname, eh_3d, sn, tol) in writers.items():
+    for sn, (nc, dv, outname, eh_3d, tol, levels) in writers.items():
         p = nc.filepath()
         nc.close()
         tipo = "3D todos níveis/tempos" if eh_3d else "2D todos tempos"
@@ -972,7 +1028,7 @@ def main():
             gerados = salvar_por_variavel(ds, args.outdir, data_str, apenas,
                                           complevel=args.complevel, jobs=args.jobs)
         else:  # cfgrib (padrão, SEM wgrib2)
-            print(f"[GRIB2/.ctl] {os.path.basename(args.entrada)} — cfgrib streaming")
+            print(f"[GRIB2/.ctl] {os.path.basename(args.entrada)} — eccodes streaming")
             print(f"\nData na nomenclatura: {data_str}")
             print(f"Saída: {os.path.abspath(args.outdir)}")
             print(f"Compressão zlib nível {args.complevel}\n")
