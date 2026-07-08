@@ -706,13 +706,15 @@ def converter_binario(info, outdir, data_str, wanted=None, complevel=1, jobs=1,
 # Lê o .ctl (template + tempos) e abre cada GRIB2 por-tempo com cfgrib/eccodes,
 # gravando cada variável direto em NetCDF (memória mínima). Não requer wgrib2.
 # =========================================================================
-def _grib2_campos(fn):
-    """Abre um GRIB2 e devolve {nome: (lat, lon, valores, lev_or_None)}.
+def _grib2_descobre(fn):
+    """Descobre as variáveis de um GRIB2 (open_datasets, chamado 1x).
 
-    Aceita variáveis 2D (lat,lon) e 3D (um eixo vertical + lat,lon).
+    Retorna {nome: dict(shortName, typeOfLevel, lat, lon, lev)}. Usado só para
+    listar/descobrir a grade — a LEITURA em si usa _grib2_le (filter_by_keys),
+    que lê apenas a variável pedida (muito mais rápido).
     """
     import cfgrib
-    out = {}
+    meta = {}
     for ds in cfgrib.open_datasets(fn, backend_kwargs={"indexpath": ""}):
         if "latitude" not in ds.coords or "longitude" not in ds.coords:
             continue
@@ -723,12 +725,30 @@ def _grib2_campos(fn):
             if da.dims[-2:] != ("latitude", "longitude"):
                 continue
             extra = list(da.dims[:-2])
-            if len(extra) == 0:
-                out[str(v)] = (lat, lon, da.values.astype("f4"), None)
-            elif len(extra) == 1:
-                lv = (extra[0], np.atleast_1d(da[extra[0]].values))
-                out[str(v)] = (lat, lon, da.values.astype("f4"), lv)
-    return out
+            if len(extra) > 1:
+                continue
+            lev = (extra[0], np.atleast_1d(da[extra[0]].values)) if extra else None
+            meta[str(v)] = dict(
+                shortName=da.attrs.get("GRIB_shortName", str(v)),
+                typeOfLevel=da.attrs.get("GRIB_typeOfLevel"),
+                lat=lat, lon=lon, lev=lev)
+    return meta
+
+
+def _grib2_le(fn, shortname, typeoflevel):
+    """Lê UMA variável de um GRIB2 via filter_by_keys (decodifica só ela)."""
+    fbk = {"shortName": shortname}
+    if typeoflevel:
+        fbk["typeOfLevel"] = typeoflevel
+    try:
+        ds = xr.open_dataset(fn, engine="cfgrib",
+                             backend_kwargs={"indexpath": "", "filter_by_keys": fbk})
+    except Exception:
+        return None
+    dvs = [v for v in ds.data_vars if ds[v].dims[-2:] == ("latitude", "longitude")]
+    if not dvs:
+        return None
+    return ds[dvs[0]].values.astype("f4")
 
 
 def _grib2_primeiro_arquivo(info):
@@ -745,11 +765,13 @@ def listar_vars_grib2(info):
     f0 = _grib2_primeiro_arquivo(info)
     if not f0:
         sys.exit("Nenhum arquivo GRIB2 encontrado (confira DSET/template do .ctl).")
-    base = _grib2_campos(f0)
+    meta = _grib2_descobre(f0)
     print(f"Variáveis no GRIB2 ({os.path.basename(f0)}):")
-    for v, (lat, lon, arr, lev) in base.items():
+    for v, m in meta.items():
+        lev = m["lev"]
         tipo = f"3D ({lev[0]}={len(lev[1])})" if lev is not None else "2D"
-        print(f"  {v:<18} {tipo:<16} grade {len(lat)}x{len(lon)}")
+        print(f"  {v:<18} {tipo:<16} grade {len(m['lat'])}x{len(m['lon'])}  "
+              f"(shortName={m['shortName']}, level={m['typeOfLevel']})")
 
 
 def converter_grib2_cfgrib(info, outdir, data_str, wanted=None, complevel=1,
@@ -764,8 +786,8 @@ def converter_grib2_cfgrib(info, outdir, data_str, wanted=None, complevel=1,
     f0 = _grib2_primeiro_arquivo(info)
     if not f0:
         sys.exit("Nenhum arquivo GRIB2 encontrado (confira DSET/template do .ctl).")
-    base = _grib2_campos(f0)
-    todos = list(base.keys())
+    meta = _grib2_descobre(f0)          # descoberta 1x (grade, shortName, nível)
+    todos = list(meta.keys())
 
     sel = todos
     if wanted:
@@ -781,7 +803,8 @@ def converter_grib2_cfgrib(info, outdir, data_str, wanted=None, complevel=1,
     fillv = np.float32(9.969209968386869e36)
     writers = {}
     for v in sel:
-        lat, lon, arr, lev = base[v]
+        m = meta[v]
+        lat, lon, lev = m["lat"], m["lon"], m["lev"]
         ny, nx = len(lat), len(lon)
         eh_3d = lev is not None
         outname = asname if (asname and len(sel) == 1) else v
@@ -816,18 +839,18 @@ def converter_grib2_cfgrib(info, outdir, data_str, wanted=None, complevel=1,
         if complevel and complevel > 0:
             kw.update(zlib=True, complevel=int(complevel), chunksizes=chunk)
         dv = nc.createVariable(outname, "f4", dims, **kw)
-        writers[v] = (nc, dv, outname, eh_3d)
+        writers[v] = (nc, dv, outname, eh_3d, m["shortName"], m["typeOfLevel"])
 
-    print(f"  {len(writers)} variável(is) x {ntime} tempos (GRIB2/cfgrib)...", flush=True)
+    print(f"  {len(writers)} variável(is) x {ntime} tempos (GRIB2/cfgrib, "
+          f"leitura por filter_by_keys)...", flush=True)
     for ti, vt in enumerate(times):
         fn = _tmpl_name(dset, vt) if info.get("template", True) else dset
         if not os.path.exists(fn):
             continue
-        campos = _grib2_campos(fn)
-        for v, (nc, dv, outname, eh_3d) in writers.items():
-            if v not in campos:
+        for v, (nc, dv, outname, eh_3d, sn, tol) in writers.items():
+            arr = _grib2_le(fn, sn, tol)       # decodifica SÓ esta variável
+            if arr is None:
                 continue
-            arr = campos[v][2]
             if eh_3d:
                 dv[ti, :, :, :] = arr
             else:
@@ -836,7 +859,7 @@ def converter_grib2_cfgrib(info, outdir, data_str, wanted=None, complevel=1,
             print(f"    ... {ti + 1}/{ntime} tempos", flush=True)
 
     gerados = []
-    for v, (nc, dv, outname, eh_3d) in writers.items():
+    for v, (nc, dv, outname, eh_3d, sn, tol) in writers.items():
         p = nc.filepath()
         nc.close()
         tipo = "3D todos níveis/tempos" if eh_3d else "2D todos tempos"
