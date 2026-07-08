@@ -121,6 +121,27 @@ No cluster, use o `roda_prec_acum24h.pbs` (mesma lógica do batch de conversão:
 descoberta por glob, filtro de período `INIT_FROM/INIT_TO`, execução paralela nos
 256 núcleos). Envie com `qsub roda_prec_acum24h.pbs`.
 
+## MERGE/GPM (precip horária) — período em 1 NetCDF (`merge2nc.py`)
+
+O produto MERGE/CPTEC tem **um GRIB2 por hora** (acúmulo horário de precipitação)
+na árvore `BASE/AAAA/MM/DD/MERGE_CPTEC_AAAAMMDDHH.grib2`. O `merge2nc.py` lê um
+**período** (hora a hora) e grava **toda a série num único** NetCDF
+(dims `time, lat, lon`), em streaming via eccodes (sem wgrib2). Requer o ambiente
+conda (`environment.yml`).
+
+```bash
+# ver a variável do GRIB2 (nome do eccodes):
+python merge2nc.py 2026010100 2026010123 --list-vars
+
+# converter janeiro/2026 inteiro para um arquivo:
+python merge2nc.py 2026010100 2026013123 -o MERGE_202601.nc
+```
+
+Opções: `--base` (dir do MERGE), `--var` (shortName; auto se omitido),
+`--asname` (nome na saída, padrão `prec`), `--step` (horas, padrão 1),
+`--complevel`. Horas ausentes viram `NaN`. Como é acúmulo horário, o
+`prec_acum24h.py --mode sum` roda por cima se quiser acumular em 24 h.
+
 ## Conversão interativa por período (sem PBS)
 
 Quando os dados de entrada (ex.: `/oper/...`) **não são visíveis dos nós de
