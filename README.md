@@ -121,6 +121,33 @@ No cluster, use o `roda_prec_acum24h.pbs` (mesma lógica do batch de conversão:
 descoberta por glob, filtro de período `INIT_FROM/INIT_TO`, execução paralela nos
 256 núcleos). Envie com `qsub roda_prec_acum24h.pbs`.
 
+## Conversão interativa por período (sem PBS)
+
+Quando os dados de entrada (ex.: `/oper/...`) **não são visíveis dos nós de
+processamento**, o PBS não serve — rode direto no nó de login com
+`converte_periodo.sh`, passando o período de rodadas:
+
+```bash
+bash converte_periodo.sh 2026010100 2026033100
+```
+
+Ele percorre as inicializações de `INIT_FROM` a `INIT_TO` (passo `STEP_H` horas,
+padrão 12 = rodadas 00 e 12 UTC), monta o caminho de cada `.ctl` na árvore oper
+(`BASE/AAAA/MM/DD/HH/Eta_ams_08km_<init>.ctl`) e converte cada uma para
+`OUTROOT/<init>/`, com `JOBS` conversões em paralelo (padrão 4 — modesto, para
+não sobrecarregar o login). As opções (`CONDA_ENV`, `VARS`, `GRIB_ASNAME`, `BASE`,
+`OUTROOT`, `JOBS`, `STEP_H`) vêm do `convert2nc.env` ou do ambiente.
+
+Para não perder o progresso se a conexão cair, use `tmux`/`screen` ou `nohup`:
+
+```bash
+nohup bash converte_periodo.sh 2026010100 2026033100 > periodo.log 2>&1 &
+tail -f periodo.log
+```
+
+Depois, o acúmulo de 24 h roda igual, sobre os `.nc` já convertidos (que ficam
+no seu espaço, acessível): `python prec_acum24h.py ./nc/*/PREC_*.nc`.
+
 ## Submissão no cluster (PBS)
 
 O `roda_convert2nc.pbs` (nó de 256 processadores) tem dois modos, escolhidos na
