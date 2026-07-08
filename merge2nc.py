@@ -131,7 +131,7 @@ def escolhe_var(inv, pedido):
         sys.exit(f"Variável '{pedido}' não está no GRIB2. Disponíveis: {list(inv)}")
     if len(inv) == 1:
         return next(iter(inv))
-    for cand in ("prec", "tp", "acpcp", "prate", "unknown"):
+    for cand in ("rdp", "prec", "tp", "acpcp", "prate", "unknown"):
         for k in inv:
             if k.lower() == cand:
                 return k
