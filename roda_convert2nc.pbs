@@ -24,8 +24,25 @@ set -euo pipefail
 cd "${PBS_O_WORKDIR:-$PWD}"
 echo "Rodando em: $(hostname)  |  dir: $PWD  |  início: $(date)"
 
-# --- ambiente Python (ajuste o caminho do seu venv/conda) ---
+# --- ambiente Python ---
+# FORMATO=bin  -> basta numpy/pandas/xarray/netcdf4 (o venv Python 3.6 serve).
+# FORMATO=grib2 (cfgrib) -> EXIGE Python >= 3.8; o cfgrib/eccodes do PyPI QUEBRA
+#   no Python 3.6 do cluster (findlibs usa ':='). Use um ambiente CONDA:
+#     conda env create -f environment.yml   (uma vez)
+# Descomente a opção que você usa:
+
+# (a) conda — recomendado; OBRIGATÓRIO para FORMATO=grib2:
+#   Criar 1x (com cache/ambiente em diretório GRAVÁVEL — o ~ pode ser read-only):
+#     module load anaconda/24.1.2
+#     export CONDA_PKGS_DIRS=/p/projetos/grpeta/Team/jorge.gomes/conda/pkgs
+#     conda env create -f environment.yml -p /p/projetos/grpeta/Team/jorge.gomes/conda/envs/convert2nc
+# module load anaconda/24.1.2
+# source /p/app/anaconda/etc/profile.d/conda.sh    # carrega o hook do conda no job
+# conda activate /p/projetos/grpeta/Team/jorge.gomes/conda/envs/convert2nc
+
+# (b) venv — só para FORMATO=bin:
 source ~/venvs/convert2nc/bin/activate
+
 python --version
 
 # =====================================================================

@@ -41,9 +41,15 @@ import os
 import re
 import sys
 
+import warnings
+
 import numpy as np
 import pandas as pd
 import xarray as xr
+
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
 
 
 def detecta_var(ds, preferida=None):

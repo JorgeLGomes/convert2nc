@@ -1,6 +1,9 @@
 # Ambiente conda para o conversor Convert2nc (Eta -> NetCDF)
-# Recomendado quando precisar ler GRIB2 direto (.grib2): traz o eccodes,
-# que o cfgrib exige, sem compilação manual.
+#
+# IMPORTANTE: use ESTE ambiente para GRIB2. O cfgrib/eccodes do PyPI dependem do
+# 'findlibs', que usa o operador ':=' (Python 3.8+) e QUEBRA no Python 3.6 do
+# sistema. O conda-forge traz o eccodes (lib de sistema) + Python moderno, sem
+# esse problema. Serve também para o binário GrADS (numpy/pandas/xarray/netcdf4).
 #
 # Criar:      conda env create -f environment.yml
 # Ativar:     conda activate convert2nc
@@ -12,11 +15,11 @@ name: convert2nc
 channels:
   - conda-forge
 dependencies:
-  - python>=3.9
+  - python=3.11     # >=3.8 (o cfgrib/findlibs do PyPI não roda no 3.6 do cluster)
   - numpy
   - pandas
   - xarray
   - netcdf4
-  - cfgrib          # leitura de GRIB2 direto (.grib2)
-  - eccodes         # backend GRIB exigido pelo cfgrib
-  # - wgrib2        # opcional: converter GRIB2 descrito por .ctl (--grib)
+  - cfgrib          # leitura de GRIB2 (sem wgrib2)
+  - eccodes         # backend GRIB (lib de sistema) exigido pelo cfgrib
+  # - wgrib2        # opcional: só se usar --grib-engine wgrib2

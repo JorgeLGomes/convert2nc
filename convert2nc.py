@@ -48,9 +48,17 @@ import subprocess
 import sys
 from datetime import datetime
 
+import warnings
+
 import numpy as np
 import pandas as pd
 import xarray as xr
+
+# Silencia avisos ruidosos de bibliotecas (ex.: FutureWarning do cfgrib/xarray
+# ao mesclar múltiplas mensagens GRIB2). Não afeta erros de verdade.
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
 
 
 # =========================================================================
