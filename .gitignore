@@ -32,6 +32,9 @@ __pycache__/
 venv/
 .ipynb_checkpoints/
 
+# Config local do PBS (não versionar)
+convert2nc.env
+
 # Sistema
 .DS_Store
 *.log

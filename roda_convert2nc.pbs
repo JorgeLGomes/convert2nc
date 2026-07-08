@@ -24,25 +24,22 @@ set -euo pipefail
 cd "${PBS_O_WORKDIR:-$PWD}"
 echo "Rodando em: $(hostname)  |  dir: $PWD  |  início: $(date)"
 
-# --- ambiente Python ---
-# FORMATO=bin  -> basta numpy/pandas/xarray/netcdf4 (o venv Python 3.6 serve).
-# FORMATO=grib2 (cfgrib) -> EXIGE Python >= 3.8; o cfgrib/eccodes do PyPI QUEBRA
-#   no Python 3.6 do cluster (findlibs usa ':='). Use um ambiente CONDA:
-#     conda env create -f environment.yml   (uma vez)
-# Descomente a opção que você usa:
+# --- config local (não versionada): defina TUDO aqui, sem editar este .pbs ---
+[ -f "./convert2nc.env" ] && source "./convert2nc.env"
 
-# (a) conda — recomendado; OBRIGATÓRIO para FORMATO=grib2:
-#   Criar 1x (com cache/ambiente em diretório GRAVÁVEL — o ~ pode ser read-only):
-#     module load anaconda/24.1.2
-#     export CONDA_PKGS_DIRS=/p/projetos/grpeta/Team/jorge.gomes/conda/pkgs
-#     conda env create -f environment.yml -p /p/projetos/grpeta/Team/jorge.gomes/conda/envs/convert2nc
-# module load anaconda/24.1.2
-# source /p/app/anaconda/etc/profile.d/conda.sh    # carrega o hook do conda no job
-# conda activate /p/projetos/grpeta/Team/jorge.gomes/conda/envs/convert2nc
-
-# (b) venv — só para FORMATO=bin:
-source ~/venvs/convert2nc/bin/activate
-
+# --- ambiente Python (definido no convert2nc.env) ---
+# Para GRIB2 (cfgrib) use CONDA (Python >= 3.8; o cfgrib do PyPI quebra no 3.6).
+# No convert2nc.env defina UMA das opções:
+#   CONDA_ENV="/p/.../conda/envs/convert2nc"   (+ CONDA_SH se o hook não for o padrão)
+#   VENV="~/venvs/convert2nc"                  (só serve p/ FORMATO=bin)
+if [ -n "${CONDA_ENV:-}" ]; then
+    source "${CONDA_SH:-/p/app/anaconda/etc/profile.d/conda.sh}"
+    conda activate "$CONDA_ENV"
+elif [ -n "${VENV:-}" ]; then
+    source "${VENV/#\~/$HOME}/bin/activate"
+else
+    source ~/venvs/convert2nc/bin/activate     # padrão se nada for definido
+fi
 python --version
 
 # =====================================================================
@@ -79,6 +76,14 @@ JOBS_PER_FILE="8"                # processos internos por conversão
 INIT_FROM=""                     # rodada inicial (inclusive)
 INIT_TO=""                       # rodada final   (inclusive)
 # =====================================================================
+
+# Config local (NÃO versionada): sobrepõe os padrões acima. Crie um arquivo
+# ./convert2nc.env (copie de convert2nc.env.example) com seus caminhos/opções.
+# Assim você nunca edita este .pbs versionado -> 'git pull' não conflita.
+if [ -f "./convert2nc.env" ]; then
+    echo ">>> carregando config local: ./convert2nc.env"
+    source "./convert2nc.env"
+fi
 
 VARG=()
 [ -n "$VARS" ] && VARG=(--vars "$VARS")
