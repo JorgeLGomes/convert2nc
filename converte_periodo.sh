@@ -20,14 +20,23 @@ cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [ -f "./convert2nc.env" ] && source "./convert2nc.env"
 
 # --- ambiente conda (necessário p/ GRIB2/eccodes) ---
+# Ativa SÓ se ainda não estiver no ambiente certo. Se você já rodou
+# 'conda activate <env>' antes, o script não mexe (o 'module load' pode trocar
+# o python para o base do Anaconda, SEM eccodes -> ModuleNotFoundError).
 : "${CONDA_ENV:=}"
 : "${CONDA_SH:=/p/app/anaconda/etc/profile.d/conda.sh}"
-if [ -n "$CONDA_ENV" ]; then
+if [ -n "$CONDA_ENV" ] && [ "${CONDA_PREFIX:-}" != "$CONDA_ENV" ]; then
     module load anaconda/24.1.2 2>/dev/null || true
-    source "$CONDA_SH"
-    conda activate "$CONDA_ENV"
+    source "$CONDA_SH" 2>/dev/null || true
+    conda activate "$CONDA_ENV" || { echo "!! Falha ao ativar $CONDA_ENV"; exit 1; }
 fi
 python --version
+# checagem rápida: aborta ANTES de disparar os jobs se o eccodes não estiver ok
+python -c "import eccodes" 2>/dev/null || {
+    echo "!! eccodes indisponível neste python ($(command -v python))."
+    echo "   Ative o ambiente conda antes:  conda activate ${CONDA_ENV:-<seu_env>}"
+    exit 1
+}
 
 # =====================================================================
 # CONFIG (pode vir do convert2nc.env; aqui ficam os padrões)

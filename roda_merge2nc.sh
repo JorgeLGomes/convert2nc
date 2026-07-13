@@ -18,12 +18,18 @@ cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [ -f "./convert2nc.env" ] && source "./convert2nc.env"
 
 # --- ambiente conda (Python>=3.8 + eccodes) ---
+# Ativa SÓ se ainda não estiver no ambiente certo (evita o 'module load' trocar
+# o python para o base do Anaconda, sem eccodes).
 : "${CONDA_ENV:=/p/projetos/grpeta/Team/jorge.gomes/conda/envs/convert2nc}"
 : "${CONDA_SH:=/p/app/anaconda/etc/profile.d/conda.sh}"
-module load anaconda/24.1.2 2>/dev/null || true
-source "$CONDA_SH"
-conda activate "$CONDA_ENV"
+if [ -n "$CONDA_ENV" ] && [ "${CONDA_PREFIX:-}" != "$CONDA_ENV" ]; then
+    module load anaconda/24.1.2 2>/dev/null || true
+    source "$CONDA_SH" 2>/dev/null || true
+    conda activate "$CONDA_ENV" || { echo "!! Falha ao ativar $CONDA_ENV"; exit 1; }
+fi
 python --version
+python -c "import eccodes" 2>/dev/null || {
+    echo "!! eccodes indisponível. Ative:  conda activate $CONDA_ENV"; exit 1; }
 
 # =====================================================================
 # PARÂMETROS — edite aqui (ou passe DE/ATE como argumentos)
