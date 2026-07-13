@@ -448,12 +448,15 @@ def _escrever_uma(args):
     return var, caminho, dims, tem_nivel(da)
 
 
-def salvar_por_variavel(ds, outdir, data_str, apenas=None, complevel=1, jobs=1):
+def salvar_por_variavel(ds, outdir, data_str, apenas=None, complevel=1, jobs=1,
+                        rename=None):
     """Salva CADA variável em um NetCDF separado: <var>_<data>.nc.
 
     complevel: nível zlib (0 = sem compressão, mais rápido; 1 = rápido/padrão).
     jobs:      nº de processos para gravar variáveis em paralelo (1 = sequencial).
+    rename:    mapa {nome_entrada: nome_saída} para renomear variável e arquivo.
     """
+    rename = rename or {}
     os.makedirs(outdir, exist_ok=True)
     variaveis = list(ds.data_vars)
     if apenas:
@@ -468,8 +471,9 @@ def salvar_por_variavel(ds, outdir, data_str, apenas=None, complevel=1, jobs=1):
 
     tarefas = []
     for var in variaveis:
-        caminho = os.path.join(outdir, f"{var}_{data_str}.nc")
-        tarefas.append((ds[var].to_dataset(name=var), var, caminho, complevel))
+        outname = rename.get(var, var)
+        caminho = os.path.join(outdir, f"{outname}_{data_str}.nc")
+        tarefas.append((ds[var].to_dataset(name=outname), outname, caminho, complevel))
 
     def _log(res):
         var, caminho, dims, eh_3d = res
@@ -552,19 +556,21 @@ def _worker_converter_chunk(args):
     Só nomes/parâmetros são serializados (nada de arrays grandes) — cada processo
     faz o próprio I/O do binário. Evita o limite de pickle de 4 GiB.
     """
-    info, chunk, outdir, data_str, complevel = args
+    info, chunk, outdir, data_str, complevel, rename = args
     return converter_binario(info, outdir, data_str, wanted=chunk,
-                             complevel=complevel, jobs=1, progresso_cada=0)
+                             complevel=complevel, jobs=1, progresso_cada=0,
+                             rename=rename)
 
 
 def converter_binario(info, outdir, data_str, wanted=None, complevel=1, jobs=1,
-                      progresso_cada=20):
+                      progresso_cada=20, rename=None):
     """Converte o binário GrADS para NetCDF (1 arquivo por variável), tempo a tempo.
 
     jobs>1: divide as variáveis entre `jobs` processos; cada um lê só as suas do
     disco e grava seus NetCDF (sem serializar arrays). Escala numa mesma conversão.
     """
     import netCDF4
+    rename = rename or {}
     os.makedirs(outdir, exist_ok=True)
 
     # resolve a seleção de variáveis já aqui (para poder dividir entre processos)
@@ -587,7 +593,7 @@ def converter_binario(info, outdir, data_str, wanted=None, complevel=1, jobs=1,
         chunks = [nomes[i::n] for i in range(n)]          # balanceia 3D entre grupos
         print(f"  {len(nomes)} variável(is) em {n} processo(s) paralelo(s)...",
               flush=True)
-        tarefas = [(info, ch, outdir, data_str, complevel) for ch in chunks]
+        tarefas = [(info, ch, outdir, data_str, complevel, rename) for ch in chunks]
         gerados = []
         with ProcessPoolExecutor(max_workers=n) as ex:
             for res in ex.map(_worker_converter_chunk, tarefas):
@@ -616,7 +622,8 @@ def converter_binario(info, outdir, data_str, wanted=None, complevel=1, jobs=1,
     for (name, nlev, units, desc) in sel:
         k = nfields_var[name]
         eh_3d = k > 1
-        path = os.path.join(outdir, f"{name}_{data_str}.nc")
+        outname = rename.get(name, name)
+        path = os.path.join(outdir, f"{outname}_{data_str}.nc")
         nc = netCDF4.Dataset(path, "w", format="NETCDF4")
         nc.createDimension("time", ntime)
         nc.createDimension("lat", ny)
@@ -651,7 +658,7 @@ def converter_binario(info, outdir, data_str, wanted=None, complevel=1, jobs=1,
             # padrão abrange vários tempos e é maior que o cache do HDF5, o que
             # torna a escrita tempo-a-tempo MUITO lenta (efeito super-linear).
             kw["chunksizes"] = (1, 1, ny, nx) if eh_3d else (1, ny, nx)
-        dv = nc.createVariable(name, "f4", dims, **kw)
+        dv = nc.createVariable(outname, "f4", dims, **kw)
         if units:
             dv.units = units
         if desc:
@@ -825,9 +832,10 @@ def listar_vars_grib2(info):
 
 
 def converter_grib2_cfgrib(info, outdir, data_str, wanted=None, complevel=1,
-                           asname=None, progresso_cada=20):
+                           asname=None, progresso_cada=20, rename=None):
     """Converte GRIB2 (descrito por .ctl) para NetCDF via cfgrib, tempo a tempo."""
     import netCDF4
+    rename = rename or {}
     os.makedirs(outdir, exist_ok=True)
     times = info["times"]
     ntime = len(times)
@@ -863,7 +871,12 @@ def converter_grib2_cfgrib(info, outdir, data_str, wanted=None, complevel=1,
             continue
         lat, lon = g
         ny, nx = len(lat), len(lon)
-        outname = asname if (asname and len(sel) == 1) else sn
+        if sn in rename:
+            outname = rename[sn]
+        elif asname and len(sel) == 1:
+            outname = asname
+        else:
+            outname = sn
         path = os.path.join(outdir, f"{outname}_{data_str}.nc")
         nc = netCDF4.Dataset(path, "w", format="NETCDF4")
         nc.createDimension("time", ntime)
@@ -924,6 +937,31 @@ def converter_grib2_cfgrib(info, outdir, data_str, wanted=None, complevel=1,
     return gerados
 
 
+def _rename_map(rename_str, vars_list):
+    """Mapa nome_de_entrada -> nome_de_saída.
+
+    Aceita: pares 'grib:novo,grib2:novo2'  OU  uma lista simples do mesmo
+    tamanho de --vars (correspondência posicional).
+    Ex.: --vars 2t,10u,10v,prmsl  --rename tp2m,u10m,v10m,pslm
+         --rename 2t:tp2m,10u:u10m,10v:v10m,prmsl:pslm
+    """
+    rmap = {}
+    if not rename_str:
+        return rmap
+    parts = [p.strip() for p in rename_str.split(",") if p.strip()]
+    if all(":" in p for p in parts):
+        for p in parts:
+            a, b = p.split(":", 1)
+            rmap[a.strip()] = b.strip()
+    elif vars_list and len(parts) == len(vars_list):
+        for a, b in zip([v.strip() for v in vars_list], parts):
+            rmap[a] = b
+    else:
+        sys.exit("--rename: use pares 'grib:novo' OU uma lista do mesmo "
+                 "tamanho de --vars.")
+    return rmap
+
+
 # =========================================================================
 # Carregamento de acordo com o tipo de entrada
 # =========================================================================
@@ -974,6 +1012,10 @@ def main():
     ap.add_argument("--asname", default=None,
                     help="Renomeia a variável de saída (só ao selecionar 1 var). "
                          "Ex.: --vars tp --asname PREC -> PREC_<data>.nc")
+    ap.add_argument("--rename", default=None,
+                    help="Renomeia VÁRIAS variáveis. Pares 'grib:novo' ou lista "
+                         "na ordem de --vars. Ex.: --vars 2t,10u,10v,prmsl "
+                         "--rename tp2m,u10m,v10m,pslm")
     ap.add_argument("--complevel", type=int, default=1,
                     help="Nível de compressão zlib 0-9 (0=sem compressão, mais "
                          "rápido; 1=padrão rápido). Padrão: 1.")
@@ -987,6 +1029,7 @@ def main():
 
     t0 = datetime.now()
     apenas = args.vars.split(",") if args.vars else None
+    renomear = _rename_map(args.rename, apenas)
     ext = os.path.splitext(args.entrada)[1].lower()
 
     # ---- descobre o tipo de entrada ----
@@ -1012,7 +1055,8 @@ def main():
         print(f"Compressão zlib nível {args.complevel}  |  jobs={args.jobs}\n")
         print("Convertendo variáveis (1 arquivo por variável):")
         gerados = converter_binario(info, args.outdir, data_str, apenas,
-                                    complevel=args.complevel, jobs=args.jobs)
+                                    complevel=args.complevel, jobs=args.jobs,
+                                    rename=renomear)
     # ---- GRIB2 descrito por .ctl ----
     elif modo == "grib_ctl":
         if args.list_vars:
@@ -1026,7 +1070,8 @@ def main():
             print(f"\nData na nomenclatura: {data_str}")
             print(f"Saída: {os.path.abspath(args.outdir)}\n")
             gerados = salvar_por_variavel(ds, args.outdir, data_str, apenas,
-                                          complevel=args.complevel, jobs=args.jobs)
+                                          complevel=args.complevel, jobs=args.jobs,
+                                          rename=renomear)
         else:  # cfgrib (padrão, SEM wgrib2)
             print(f"[GRIB2/.ctl] {os.path.basename(args.entrada)} — eccodes streaming")
             print(f"\nData na nomenclatura: {data_str}")
@@ -1034,7 +1079,8 @@ def main():
             print(f"Compressão zlib nível {args.complevel}\n")
             print("Convertendo variáveis (1 arquivo por variável):")
             gerados = converter_grib2_cfgrib(info, args.outdir, data_str, apenas,
-                                             complevel=args.complevel, asname=args.asname)
+                                             complevel=args.complevel,
+                                             asname=args.asname, rename=renomear)
     # ---- arquivo .grib2 direto ----
     else:
         ds = read_grib_cfgrib(args.entrada)
@@ -1042,7 +1088,8 @@ def main():
         print(f"\nData na nomenclatura: {data_str}")
         print(f"Saída: {os.path.abspath(args.outdir)}\n")
         gerados = salvar_por_variavel(ds, args.outdir, data_str, apenas,
-                                      complevel=args.complevel, jobs=args.jobs)
+                                      complevel=args.complevel, jobs=args.jobs,
+                                      rename=renomear)
 
     dt = (datetime.now() - t0).total_seconds()
     print(f"\nConcluído em {dt:.1f}s. {len(gerados)} arquivo(s) NetCDF gerado(s).")

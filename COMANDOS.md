@@ -33,7 +33,16 @@ python convert2nc.py Eta_ams_08km_2026010100.ctl --grib --list-vars
 
 # 2) converter várias variáveis (cada uma vira um .nc):
 python convert2nc.py Eta_ams_08km_2026010100.ctl --grib \
-    --vars tmp2m,ugrd10m,vgrd10m,acpcp -o ./
+    --vars 2t,10u,10v,prmsl -o ./
+
+# renomear VÁRIAS variáveis na saída (--rename): duas formas equivalentes
+#   (a) lista na mesma ordem de --vars:
+python convert2nc.py Eta_ams_08km_2026010100.ctl --grib \
+    --vars 2t,10u,10v,prmsl --rename tp2m,u10m,v10m,pslm -o ./
+#   (b) pares grib:novo (independe da ordem):
+python convert2nc.py Eta_ams_08km_2026010100.ctl --grib \
+    --vars 2t,10u,10v,prmsl --rename 2t:tp2m,10u:u10m,10v:v10m,prmsl:pslm -o ./
+# -> gera tp2m_<data>.nc, u10m_<data>.nc, v10m_<data>.nc, pslm_<data>.nc
 
 # uma só, renomeando a saída (ex.: acpcp -> PREC):
 python convert2nc.py Eta_ams_08km_2026010100.ctl --grib --vars acpcp --asname PREC -o ./
