@@ -6,12 +6,13 @@ tmp/
 *.nc
 !*.example.nc
 
-# Saídas de job PBS/Torque
+# Saídas de job PBS/Torque (jobname.oJOBID / .eJOBID — sufixo numérico)
 *.out
 *.err
-convert2nc.log
-convert2nc.o*
-convert2nc.e*
+convert2nc.o[0-9]*
+convert2nc.e[0-9]*
+prec_acum24h.o[0-9]*
+prec_acum24h.e[0-9]*
 
 # Dados brutos de entrada
 *.bin
