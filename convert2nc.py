@@ -471,7 +471,7 @@ def salvar_por_variavel(ds, outdir, data_str, apenas=None, complevel=1, jobs=1,
 
     tarefas = []
     for var in variaveis:
-        outname = rename.get(var, var)
+        outname = rename.get(var.lower(), var)
         caminho = os.path.join(outdir, f"{outname}_{data_str}.nc")
         tarefas.append((ds[var].to_dataset(name=outname), outname, caminho, complevel))
 
@@ -622,7 +622,7 @@ def converter_binario(info, outdir, data_str, wanted=None, complevel=1, jobs=1,
     for (name, nlev, units, desc) in sel:
         k = nfields_var[name]
         eh_3d = k > 1
-        outname = rename.get(name, name)
+        outname = rename.get(name.lower(), name)
         path = os.path.join(outdir, f"{outname}_{data_str}.nc")
         nc = netCDF4.Dataset(path, "w", format="NETCDF4")
         nc.createDimension("time", ntime)
@@ -871,8 +871,8 @@ def converter_grib2_cfgrib(info, outdir, data_str, wanted=None, complevel=1,
             continue
         lat, lon = g
         ny, nx = len(lat), len(lon)
-        if sn in rename:
-            outname = rename[sn]
+        if sn.lower() in rename:
+            outname = rename[sn.lower()]
         elif asname and len(sel) == 1:
             outname = asname
         else:
@@ -952,9 +952,9 @@ def _rename_map(rename_str, vars_list):
     if all(":" in p for p in parts):
         for p in parts:
             a, b = p.split(":", 1)
-            rmap[a.strip()] = b.strip()
+            rmap[a.strip().lower()] = b.strip()     # chave minúscula (case-insensitive)
     elif vars_list and len(parts) == len(vars_list):
-        for a, b in zip([v.strip() for v in vars_list], parts):
+        for a, b in zip([v.strip().lower() for v in vars_list], parts):
             rmap[a] = b
     else:
         sys.exit("--rename: use pares 'grib:novo' OU uma lista do mesmo "

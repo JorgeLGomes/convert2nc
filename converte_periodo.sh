@@ -31,12 +31,14 @@ if [ -n "$CONDA_ENV" ] && [ "${CONDA_PREFIX:-}" != "$CONDA_ENV" ]; then
     conda activate "$CONDA_ENV" || { echo "!! Falha ao ativar $CONDA_ENV"; exit 1; }
 fi
 python --version
-# checagem rápida: aborta ANTES de disparar os jobs se o eccodes não estiver ok
-python -c "import eccodes" 2>/dev/null || {
-    echo "!! eccodes indisponível neste python ($(command -v python))."
-    echo "   Ative o ambiente conda antes:  conda activate ${CONDA_ENV:-<seu_env>}"
-    exit 1
-}
+# eccodes só é necessário p/ GRIB2. Para binário (FORMATO=bin) não checa.
+if [ "${FORMATO:-grib2}" = "grib2" ]; then
+    python -c "import eccodes" 2>/dev/null || {
+        echo "!! eccodes indisponível neste python ($(command -v python))."
+        echo "   Ative o ambiente conda antes:  conda activate ${CONDA_ENV:-<seu_env>}"
+        exit 1
+    }
+fi
 
 # =====================================================================
 # CONFIG (pode vir do convert2nc.env; aqui ficam os padrões)
@@ -45,10 +47,14 @@ INIT_FROM="${1:-${INIT_FROM:-2026010100}}"   # 1º arg ou convert2nc.env
 INIT_TO="${2:-${INIT_TO:-2026033100}}"       # 2º arg ou convert2nc.env
 STEP_H="${STEP_H:-12}"                        # passo entre rodadas (12 = 00 e 12 UTC)
 
-# árvore dos dados oper e nome do .ctl (dentro de AAAA/MM/DD/HH/).
-# Use %INIT% como marcador da data de inicialização (AAAAMMDDHH).
+FORMATO="${FORMATO:-grib2}"                    # "bin" (.ctl+.bin) ou "grib2"
 BASE="${BASE:-/oper/dados/modelo/eta/ams_08km/brutos}"
-CTLTPL="${CTLTPL:-Eta_ams_08km_%INIT%.ctl}"
+# CTLREL: caminho do .ctl RELATIVO a BASE, com %INIT% (=AAAAMMDDHH) e códigos
+# strftime (%Y %m %d %H). Cobre estruturas de diretório diferentes:
+#   Eta grib2 oper  : "%Y/%m/%d/%H/Eta_ams_08km_%INIT%.ctl"
+#   Eta binário jaci: "%INIT%/E03/Eta08_E03_%INIT%.ctl"
+# (compatível: se não definir CTLREL, usa %Y/%m/%d/%H/ + CTLTPL antigo.)
+CTLREL="${CTLREL:-%Y/%m/%d/%H/${CTLTPL:-Eta_ams_08km_%INIT%.ctl}}"
 
 OUTROOT="${OUTROOT:-./nc}"                     # saída: OUTROOT/AAAAMMDDHH/
 VARS="${VARS:-acpcp}"                          # nome(s) do eccodes (veja --list-vars)
@@ -59,19 +65,25 @@ JOBS="${JOBS:-4}"                              # conversões simultâneas (login
 # =====================================================================
 
 echo ">>> período $INIT_FROM .. $INIT_TO (passo ${STEP_H}h) | $JOBS em paralelo"
-echo ">>> saída em $OUTROOT | VARS=$VARS ASNAME=$GRIB_ASNAME"
+echo ">>> FORMATO=$FORMATO | saída em $OUTROOT | VARS=$VARS"
 
 conv_one() {
     init="$1"
     y=${init:0:4}; m=${init:4:2}; d=${init:6:2}; h=${init:8:2}
-    ctl="$BASE/$y/$m/$d/$h/${CTLTPL/'%INIT%'/$init}"
+    rel="${CTLREL//%INIT%/$init}"                 # troca %INIT% -> AAAAMMDDHH
+    rel=$(date -u -d "$y-$m-$d $h:00:00" +"$rel")  # expande %Y/%m/%d/%H, se houver
+    ctl="$BASE/$rel"
     out="$OUTROOT/$init"
     if [ ! -f "$ctl" ]; then
         echo "[--] $init sem .ctl ($ctl)"
         return
     fi
     mkdir -p "$out"
-    args=(--grib --complevel "$COMPLEVEL")
+    args=(--complevel "$COMPLEVEL")
+    if [ "$FORMATO" = "grib2" ]; then
+        args+=(--grib --grib-engine "${GRIB_ENGINE:-cfgrib}")
+        [ "${GRIB_ENGINE:-cfgrib}" = "wgrib2" ] && args+=(--wgrib2 "${WGRIB2:-wgrib2}")
+    fi
     [ -n "$VARS" ] && args+=(--vars "$VARS")
     [ -n "$RENAME" ] && args+=(--rename "$RENAME")
     [ -n "$GRIB_ASNAME" ] && args+=(--asname "$GRIB_ASNAME")
