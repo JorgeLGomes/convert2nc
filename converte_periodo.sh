@@ -42,8 +42,9 @@ BASE="${BASE:-/oper/dados/modelo/eta/ams_08km/brutos}"
 CTLTPL="${CTLTPL:-Eta_ams_08km_%INIT%.ctl}"
 
 OUTROOT="${OUTROOT:-./nc}"                     # saída: OUTROOT/AAAAMMDDHH/
-VARS="${VARS:-acpcp}"                          # nome do eccodes (veja --list-vars)
-GRIB_ASNAME="${GRIB_ASNAME:-PREC}"             # renomeia p/ PREC_<data>.nc
+VARS="${VARS:-acpcp}"                          # nome(s) do eccodes (veja --list-vars)
+GRIB_ASNAME="${GRIB_ASNAME:-}"                 # renomear 1 variável (ex.: PREC)
+RENAME="${RENAME:-}"                           # renomear VÁRIAS (pares grib:novo)
 COMPLEVEL="${COMPLEVEL:-1}"
 JOBS="${JOBS:-4}"                              # conversões simultâneas (login: modesto!)
 # =====================================================================
@@ -63,6 +64,7 @@ conv_one() {
     mkdir -p "$out"
     args=(--grib --complevel "$COMPLEVEL")
     [ -n "$VARS" ] && args+=(--vars "$VARS")
+    [ -n "$RENAME" ] && args+=(--rename "$RENAME")
     [ -n "$GRIB_ASNAME" ] && args+=(--asname "$GRIB_ASNAME")
     echo "[$(date +%T)] início $init"
     if python convert2nc.py "$ctl" -o "$out" "${args[@]}" > "$out/convert_${init}.log" 2>&1; then

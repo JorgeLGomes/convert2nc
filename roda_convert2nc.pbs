@@ -94,6 +94,7 @@ FMT_FLAGS=()
 if [ "$FORMATO" = "grib2" ]; then
     FMT_FLAGS=(--grib --grib-engine "$GRIB_ENGINE")
     [ "$GRIB_ENGINE" = "wgrib2" ] && FMT_FLAGS+=(--wgrib2 "$WGRIB2")
+    [ -n "${RENAME:-}" ] && FMT_FLAGS+=(--rename "$RENAME")
     [ -n "$GRIB_ASNAME" ] && FMT_FLAGS+=(--asname "$GRIB_ASNAME")
 fi
 
@@ -183,7 +184,7 @@ elif [ "$MODE" = "batch" ]; then
 
     # jobs internos por conversão: binário usa JOBS_PER_FILE; grib2 usa 1
     IJOBS="$JOBS_PER_FILE"; [ "$FORMATO" = "grib2" ] && IJOBS=1
-    export OUTROOT COMPLEVEL IJOBS VARS FORMATO GRIB_ENGINE GRIB_ASNAME WGRIB2
+    export OUTROOT COMPLEVEL IJOBS VARS FORMATO GRIB_ENGINE GRIB_ASNAME RENAME WGRIB2
     convert_one() {
         ctl="$1"
         init=$(basename "$ctl" | grep -oE '[0-9]{10}' | head -1)
@@ -192,6 +193,7 @@ elif [ "$MODE" = "batch" ]; then
         if [ "$FORMATO" = "grib2" ]; then
             flags+=(--grib --grib-engine "$GRIB_ENGINE")
             [ "$GRIB_ENGINE" = "wgrib2" ] && flags+=(--wgrib2 "$WGRIB2")
+            [ -n "${RENAME:-}" ] && flags+=(--rename "$RENAME")
             [ -n "$GRIB_ASNAME" ] && flags+=(--asname "$GRIB_ASNAME")
         fi
         [ -n "${VARS:-}" ] && flags+=(--vars "$VARS")
