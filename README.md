@@ -52,6 +52,8 @@ python convert2nc.py entrada.ctl -o saida/ --vars tp2m,temp,uvel --date 20260707
 | `--wgrib2`    | Caminho do executável `wgrib2` (para `--grib`).                  |
 | `--complevel` | Nível de compressão zlib 0–9 (`0`=sem compressão, mais rápido). Padrão: `1`. |
 | `--jobs/-j`   | Processos p/ gravar variáveis em paralelo — **só GRIB2**. Padrão: `1`. |
+| `--prefix`    | Prefixo do nome dos arquivos. Ex.: `--prefix Eta08_E01_` → `Eta08_E01_TP2M_<data>.nc`. |
+| `--split`     | `month` = um NetCDF por variável **por mês-calendário** (`<var>_<data>_<AAAAMM>.nc`) — p/ rodadas longas/clima. Só no caminho binário. Padrão: `none`. |
 
 ## Desempenho e memória
 
@@ -76,6 +78,18 @@ Compressão (`--complevel`):
   3D ficam enormes (uma 3D com muitos níveis × 265 tempos pode passar de 10 GB).
 - `--complevel 0`: escrita mais rápida, arquivos maiores — ok para 2D ou `.nc`
   intermediários com espaço em disco sobrando.
+
+Rodadas longas (clima): use `--split month` para gerar um arquivo por variável
+por mês-calendário (`<var>_<data>_<AAAAMM>.nc`). Os meses são processados em
+sequência (nunca mais que n_variáveis arquivos abertos) e a concatenação dos
+mensais é idêntica ao arquivo único.
+
+**Integração com o Eta**: o pipeline do Eta (v1.5.0-desenv) submete a conversão
+pós-rodada pelo `Conv2NC.sh` (template `atmos/scripts/Conv2NC.sh_Templ`),
+disparado pelo `Finaliza` na última hora do pós. No `ConfigRun` defina
+`convert2ncPath` (dir deste projeto no cluster), `convert2ncEnv` (script de
+ativação do python) e `convert2ncJobs`; com `Fct > 744 h` o `--split month` é
+aplicado automaticamente. `convert2ncPath` vazio mantém o fluxo legado (cdo).
 
 Para reduzir tempo/disco, converta só as variáveis necessárias:
 

@@ -50,6 +50,8 @@ FORMATO="bin"                    # "bin" (.ctl + .bin) | "grib2" (.ctl DTYPE gri
 NCORES=256                       # processadores do nó
 VARS=""                          # ex.: "TP2M,U10M,V10M,PREC"; vazio = todas
 COMPLEVEL=1                      # 1 = padrão (bom p/ 3D); 0 = sem compressão (arquivos grandes)
+SPLIT=""                         # "month" = 1 NetCDF por variável POR MÊS (clima); vazio = série toda em 1
+PREFIX=""                        # prefixo dos arquivos de saída (ex.: "Eta08_E03_")
 
 # --- Opções de GRIB2 (usadas só quando FORMATO=grib2) ---
 GRIB_ENGINE="cfgrib"             # "cfgrib" (Python/eccodes, SEM wgrib2 — padrão)
@@ -97,6 +99,8 @@ if [ "$FORMATO" = "grib2" ]; then
     [ -n "${RENAME:-}" ] && FMT_FLAGS+=(--rename "$RENAME")
     [ -n "$GRIB_ASNAME" ] && FMT_FLAGS+=(--asname "$GRIB_ASNAME")
 fi
+[ -n "${SPLIT:-}" ]  && FMT_FLAGS+=(--split "$SPLIT")
+[ -n "${PREFIX:-}" ] && FMT_FLAGS+=(--prefix "$PREFIX")
 
 if [ "$MODE" = "single" ]; then
     IJOBS="$JOBS"; [ "$FORMATO" = "grib2" ] && IJOBS=1
@@ -184,7 +188,7 @@ elif [ "$MODE" = "batch" ]; then
 
     # jobs internos por conversão: binário usa JOBS_PER_FILE; grib2 usa 1
     IJOBS="$JOBS_PER_FILE"; [ "$FORMATO" = "grib2" ] && IJOBS=1
-    export OUTROOT COMPLEVEL IJOBS VARS FORMATO GRIB_ENGINE GRIB_ASNAME RENAME WGRIB2
+    export OUTROOT COMPLEVEL IJOBS VARS FORMATO GRIB_ENGINE GRIB_ASNAME RENAME WGRIB2 SPLIT PREFIX
     convert_one() {
         ctl="$1"
         init=$(basename "$ctl" | grep -oE '[0-9]{10}' | head -1)
@@ -197,6 +201,8 @@ elif [ "$MODE" = "batch" ]; then
             [ -n "$GRIB_ASNAME" ] && flags+=(--asname "$GRIB_ASNAME")
         fi
         [ -n "${VARS:-}" ] && flags+=(--vars "$VARS")
+        [ -n "${SPLIT:-}" ]  && flags+=(--split "$SPLIT")
+        [ -n "${PREFIX:-}" ] && flags+=(--prefix "$PREFIX")
         echo "[$(date +%T)] início $init -> $out"
         python convert2nc.py "$ctl" -o "$out" "${flags[@]}" \
             > "$out/convert_${init}.log" 2>&1 \

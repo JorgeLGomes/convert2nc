@@ -87,6 +87,8 @@ conv_one() {
     [ -n "$VARS" ] && args+=(--vars "$VARS")
     [ -n "$RENAME" ] && args+=(--rename "$RENAME")
     [ -n "$GRIB_ASNAME" ] && args+=(--asname "$GRIB_ASNAME")
+    [ -n "${SPLIT:-}" ]  && args+=(--split "$SPLIT")
+    [ -n "${PREFIX:-}" ] && args+=(--prefix "$PREFIX")
     echo "[$(date +%T)] início $init"
     if python convert2nc.py "$ctl" -o "$out" "${args[@]}" > "$out/convert_${init}.log" 2>&1; then
         echo "[$(date +%T)] OK   $init"

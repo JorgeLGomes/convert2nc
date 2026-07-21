@@ -449,12 +449,13 @@ def _escrever_uma(args):
 
 
 def salvar_por_variavel(ds, outdir, data_str, apenas=None, complevel=1, jobs=1,
-                        rename=None):
-    """Salva CADA variável em um NetCDF separado: <var>_<data>.nc.
+                        rename=None, prefix=""):
+    """Salva CADA variável em um NetCDF separado: <prefix><var>_<data>.nc.
 
     complevel: nível zlib (0 = sem compressão, mais rápido; 1 = rápido/padrão).
     jobs:      nº de processos para gravar variáveis em paralelo (1 = sequencial).
     rename:    mapa {nome_entrada: nome_saída} para renomear variável e arquivo.
+    prefix:    prefixo do nome do arquivo (ex.: 'Eta08_E01_').
     """
     rename = rename or {}
     os.makedirs(outdir, exist_ok=True)
@@ -472,7 +473,7 @@ def salvar_por_variavel(ds, outdir, data_str, apenas=None, complevel=1, jobs=1,
     tarefas = []
     for var in variaveis:
         outname = rename.get(var.lower(), var)
-        caminho = os.path.join(outdir, f"{outname}_{data_str}.nc")
+        caminho = os.path.join(outdir, f"{prefix}{outname}_{data_str}.nc")
         tarefas.append((ds[var].to_dataset(name=outname), outname, caminho, complevel))
 
     def _log(res):
@@ -556,18 +557,22 @@ def _worker_converter_chunk(args):
     Só nomes/parâmetros são serializados (nada de arrays grandes) — cada processo
     faz o próprio I/O do binário. Evita o limite de pickle de 4 GiB.
     """
-    info, chunk, outdir, data_str, complevel, rename = args
+    info, chunk, outdir, data_str, complevel, rename, prefix, split = args
     return converter_binario(info, outdir, data_str, wanted=chunk,
                              complevel=complevel, jobs=1, progresso_cada=0,
-                             rename=rename)
+                             rename=rename, prefix=prefix, split=split)
 
 
 def converter_binario(info, outdir, data_str, wanted=None, complevel=1, jobs=1,
-                      progresso_cada=20, rename=None):
+                      progresso_cada=20, rename=None, prefix="", split=None):
     """Converte o binário GrADS para NetCDF (1 arquivo por variável), tempo a tempo.
 
     jobs>1: divide as variáveis entre `jobs` processos; cada um lê só as suas do
     disco e grava seus NetCDF (sem serializar arrays). Escala numa mesma conversão.
+    prefix: prefixo do nome do arquivo (ex.: 'Eta08_E01_' -> Eta08_E01_TP2M_<data>.nc).
+    split:  None = um arquivo por variável com todos os tempos (padrão);
+            'month' = um arquivo por variável POR MÊS-calendário
+            (<prefix><var>_<data>_<AAAAMM>.nc) — para rodadas longas/clima.
     """
     import netCDF4
     rename = rename or {}
@@ -593,7 +598,8 @@ def converter_binario(info, outdir, data_str, wanted=None, complevel=1, jobs=1,
         chunks = [nomes[i::n] for i in range(n)]          # balanceia 3D entre grupos
         print(f"  {len(nomes)} variável(is) em {n} processo(s) paralelo(s)...",
               flush=True)
-        tarefas = [(info, ch, outdir, data_str, complevel, rename) for ch in chunks]
+        tarefas = [(info, ch, outdir, data_str, complevel, rename, prefix, split)
+                   for ch in chunks]
         gerados = []
         with ProcessPoolExecutor(max_workers=n) as ex:
             for res in ex.map(_worker_converter_chunk, tarefas):
@@ -616,92 +622,111 @@ def converter_binario(info, outdir, data_str, wanted=None, complevel=1, jobs=1,
     if not info["template"] and not info["sequential"] and os.path.exists(info["dset"]):
         mm = np.memmap(info["dset"], dtype=dtype, mode="r")
 
-    # cria um writer NetCDF por variável (todos abertos ao mesmo tempo)
+    # --split month: segmenta a série em meses-calendário contíguos; cada
+    # segmento vira um conjunto de arquivos <prefix><var>_<data>_<AAAAMM>.nc,
+    # processado e fechado antes do próximo (nunca mais que n_vars arquivos
+    # abertos). Sem split: um único segmento com todos os tempos.
+    if split == "month":
+        segmentos = []
+        for ti, t in enumerate(times):
+            rotulo = pd.Timestamp(t).strftime("%Y%m")
+            if not segmentos or segmentos[-1][0] != rotulo:
+                segmentos.append((rotulo, []))
+            segmentos[-1][1].append(ti)
+    else:
+        segmentos = [(None, list(range(ntime)))]
+
     fillv = np.float32(9.969209968386869e36)
-    writers = {}
-    for (name, nlev, units, desc) in sel:
-        k = nfields_var[name]
-        eh_3d = k > 1
-        outname = rename.get(name.lower(), name)
-        path = os.path.join(outdir, f"{outname}_{data_str}.nc")
-        nc = netCDF4.Dataset(path, "w", format="NETCDF4")
-        nc.createDimension("time", ntime)
-        nc.createDimension("lat", ny)
-        nc.createDimension("lon", nx)
-        t0 = pd.Timestamp(times[0])
-        tv = nc.createVariable("time", "f8", ("time",))
-        tv.units = f"hours since {t0.strftime('%Y-%m-%d %H:%M:%S')}"
-        tv.calendar = "standard"
-        tv[:] = [(pd.Timestamp(t) - t0).total_seconds() / 3600.0 for t in times]
-        latv = nc.createVariable("lat", "f4", ("lat",))
-        latv[:] = lat
-        latv.units = "degrees_north"
-        latv.long_name = "latitude"
-        lonv = nc.createVariable("lon", "f4", ("lon",))
-        lonv[:] = lon
-        lonv.units = "degrees_east"
-        lonv.long_name = "longitude"
-        if eh_3d:
-            nc.createDimension("lev", k)
-            levv = nc.createVariable("lev", "f4", ("lev",))
-            levv[:] = levels[:k]
-            levv.long_name = "level"
-            dims = ("time", "lev", "lat", "lon")
-        else:
-            dims = ("time", "lat", "lon")
-        kw = dict(fill_value=fillv)
-        if complevel and complevel > 0:
-            kw.update(zlib=True, complevel=int(complevel))
-            # Chunk = 1 tempo (e 1 nível, no 3D). Alinha o chunk ao padrão de
-            # escrita (um instante por vez): cada gravação preenche um chunk
-            # inteiro, sem read-modify-write/recompressão. Sem isso, o chunk
-            # padrão abrange vários tempos e é maior que o cache do HDF5, o que
-            # torna a escrita tempo-a-tempo MUITO lenta (efeito super-linear).
-            kw["chunksizes"] = (1, 1, ny, nx) if eh_3d else (1, ny, nx)
-        dv = nc.createVariable(outname, "f4", dims, **kw)
-        if units:
-            dv.units = units
-        if desc:
-            dv.long_name = desc
-        if info.get("title"):
-            nc.title = info["title"]
-        writers[name] = (nc, dv, offsets[name], k, eh_3d)
-
-    print(f"  {len(writers)} variável(is) x {ntime} tempos — gravando tempo a tempo...",
-          flush=True)
-
-    # varredura temporal única (cada byte lido 1x; memória ~ uma fatia)
-    for ti in range(ntime):
-        block = _ler_bloco_tempo(info, ti, mm, fpt)
-        if block is not None:
-            for name, (nc, dv, off, k, eh_3d) in writers.items():
-                nb = min(k, max(0, block.shape[0] - off))
-                if nb <= 0:
-                    continue
-                sub = np.array(block[off:off + nb]).astype("f4")
-                if np.isfinite(undef):
-                    sub[sub == np.float32(undef)] = np.nan
-                if yrev:
-                    sub = sub[:, ::-1, :]
-                if zrev and eh_3d:
-                    sub = sub[::-1]
-                if eh_3d:
-                    dv[ti, :nb, :, :] = sub
-                else:
-                    dv[ti, :, :] = sub[0]
-        if progresso_cada and (ti + 1) % progresso_cada == 0:
-            print(f"    ... {ti + 1}/{ntime} tempos", flush=True)
-
     gerados = []
-    for name, (nc, dv, off, k, eh_3d) in writers.items():
-        path = nc.filepath()
-        nc.close()
-        tipo = "3D todos níveis/tempos" if eh_3d else "2D todos tempos"
-        dimtxt = (f"time={ntime} x lev={k} x lat={ny} x lon={nx}" if eh_3d
-                  else f"time={ntime} x lat={ny} x lon={nx}")
-        print(f"  [OK] {name:<12} {tipo:<24} ({dimtxt}) -> {os.path.basename(path)}",
-              flush=True)
-        gerados.append(path)
+    for rotulo, tis in segmentos:
+        nt_seg = len(tis)
+        # cria um writer NetCDF por variável (todos abertos ao mesmo tempo)
+        writers = {}
+        for (name, nlev, units, desc) in sel:
+            k = nfields_var[name]
+            eh_3d = k > 1
+            outname = rename.get(name.lower(), name)
+            sufixo = f"_{rotulo}" if rotulo else ""
+            path = os.path.join(outdir, f"{prefix}{outname}_{data_str}{sufixo}.nc")
+            nc = netCDF4.Dataset(path, "w", format="NETCDF4")
+            nc.createDimension("time", nt_seg)
+            nc.createDimension("lat", ny)
+            nc.createDimension("lon", nx)
+            t0 = pd.Timestamp(times[tis[0]])
+            tv = nc.createVariable("time", "f8", ("time",))
+            tv.units = f"hours since {t0.strftime('%Y-%m-%d %H:%M:%S')}"
+            tv.calendar = "standard"
+            tv[:] = [(pd.Timestamp(times[ti]) - t0).total_seconds() / 3600.0
+                     for ti in tis]
+            latv = nc.createVariable("lat", "f4", ("lat",))
+            latv[:] = lat
+            latv.units = "degrees_north"
+            latv.long_name = "latitude"
+            lonv = nc.createVariable("lon", "f4", ("lon",))
+            lonv[:] = lon
+            lonv.units = "degrees_east"
+            lonv.long_name = "longitude"
+            if eh_3d:
+                nc.createDimension("lev", k)
+                levv = nc.createVariable("lev", "f4", ("lev",))
+                levv[:] = levels[:k]
+                levv.long_name = "level"
+                dims = ("time", "lev", "lat", "lon")
+            else:
+                dims = ("time", "lat", "lon")
+            kw = dict(fill_value=fillv)
+            if complevel and complevel > 0:
+                kw.update(zlib=True, complevel=int(complevel))
+                # Chunk = 1 tempo (e 1 nível, no 3D). Alinha o chunk ao padrão de
+                # escrita (um instante por vez): cada gravação preenche um chunk
+                # inteiro, sem read-modify-write/recompressão. Sem isso, o chunk
+                # padrão abrange vários tempos e é maior que o cache do HDF5, o que
+                # torna a escrita tempo-a-tempo MUITO lenta (efeito super-linear).
+                kw["chunksizes"] = (1, 1, ny, nx) if eh_3d else (1, ny, nx)
+            dv = nc.createVariable(outname, "f4", dims, **kw)
+            if units:
+                dv.units = units
+            if desc:
+                dv.long_name = desc
+            if info.get("title"):
+                nc.title = info["title"]
+            writers[name] = (nc, dv, offsets[name], k, eh_3d)
+
+        etiqueta = f"[mês {rotulo}] " if rotulo else ""
+        print(f"  {etiqueta}{len(writers)} variável(is) x {nt_seg} tempos — "
+              f"gravando tempo a tempo...", flush=True)
+
+        # varredura temporal única (cada byte lido 1x; memória ~ uma fatia)
+        for li, ti in enumerate(tis):
+            block = _ler_bloco_tempo(info, ti, mm, fpt)
+            if block is not None:
+                for name, (nc, dv, off, k, eh_3d) in writers.items():
+                    nb = min(k, max(0, block.shape[0] - off))
+                    if nb <= 0:
+                        continue
+                    sub = np.array(block[off:off + nb]).astype("f4")
+                    if np.isfinite(undef):
+                        sub[sub == np.float32(undef)] = np.nan
+                    if yrev:
+                        sub = sub[:, ::-1, :]
+                    if zrev and eh_3d:
+                        sub = sub[::-1]
+                    if eh_3d:
+                        dv[li, :nb, :, :] = sub
+                    else:
+                        dv[li, :, :] = sub[0]
+            if progresso_cada and (li + 1) % progresso_cada == 0:
+                print(f"    ... {li + 1}/{nt_seg} tempos", flush=True)
+
+        for name, (nc, dv, off, k, eh_3d) in writers.items():
+            path = nc.filepath()
+            nc.close()
+            tipo = "3D todos níveis/tempos" if eh_3d else "2D todos tempos"
+            dimtxt = (f"time={nt_seg} x lev={k} x lat={ny} x lon={nx}" if eh_3d
+                      else f"time={nt_seg} x lat={ny} x lon={nx}")
+            print(f"  [OK] {etiqueta}{name:<12} {tipo:<24} ({dimtxt}) -> "
+                  f"{os.path.basename(path)}", flush=True)
+            gerados.append(path)
     if mm is not None:
         del mm
     return gerados
@@ -832,7 +857,7 @@ def listar_vars_grib2(info):
 
 
 def converter_grib2_cfgrib(info, outdir, data_str, wanted=None, complevel=1,
-                           asname=None, progresso_cada=20, rename=None):
+                           asname=None, progresso_cada=20, rename=None, prefix=""):
     """Converte GRIB2 (descrito por .ctl) para NetCDF via cfgrib, tempo a tempo."""
     import netCDF4
     rename = rename or {}
@@ -877,7 +902,7 @@ def converter_grib2_cfgrib(info, outdir, data_str, wanted=None, complevel=1,
             outname = asname
         else:
             outname = sn
-        path = os.path.join(outdir, f"{outname}_{data_str}.nc")
+        path = os.path.join(outdir, f"{prefix}{outname}_{data_str}.nc")
         nc = netCDF4.Dataset(path, "w", format="NETCDF4")
         nc.createDimension("time", ntime)
         nc.createDimension("lat", ny)
@@ -1022,10 +1047,22 @@ def main():
     ap.add_argument("--jobs", "-j", type=int, default=1,
                     help="Nº de processos paralelos (divide as variáveis entre "
                          "eles). Útil para aproveitar muitos núcleos numa conversão.")
+    ap.add_argument("--prefix", default="",
+                    help="Prefixo do nome dos arquivos de saída. Ex.: "
+                         "--prefix Eta08_E01_ -> Eta08_E01_TP2M_<data>.nc")
+    ap.add_argument("--split", choices=["none", "month"], default="none",
+                    help="'month' = um NetCDF por variável POR MÊS-calendário "
+                         "(<var>_<data>_<AAAAMM>.nc) — para rodadas longas/clima. "
+                         "Só no caminho binário (.ctl+.bin). Padrão: none.")
     args = ap.parse_args()
+    split = None if args.split == "none" else args.split
 
     if not os.path.exists(args.entrada):
         sys.exit(f"Arquivo de entrada não encontrado: {args.entrada}")
+
+    if split and (args.grib or not args.entrada.lower().endswith(".ctl")):
+        print("Aviso: --split só se aplica ao caminho binário (.ctl+.bin); ignorado.")
+        split = None
 
     t0 = datetime.now()
     apenas = args.vars.split(",") if args.vars else None
@@ -1056,12 +1093,15 @@ def main():
         print("Convertendo variáveis (1 arquivo por variável):")
         gerados = converter_binario(info, args.outdir, data_str, apenas,
                                     complevel=args.complevel, jobs=args.jobs,
-                                    rename=renomear)
+                                    rename=renomear, prefix=args.prefix,
+                                    split=split)
     # ---- GRIB2 descrito por .ctl ----
     elif modo == "grib_ctl":
         if args.list_vars:
             listar_vars_grib2(info)
             return
+        if split:
+            print("Aviso: --split só se aplica ao caminho binário; ignorado.")
         data_str = args.date or pd.Timestamp(info["times"][0]).strftime("%Y%m%d")
         if args.grib_engine == "wgrib2":
             print(f"[GRIB2/.ctl] {os.path.basename(args.entrada)} — wgrib2")
@@ -1071,7 +1111,7 @@ def main():
             print(f"Saída: {os.path.abspath(args.outdir)}\n")
             gerados = salvar_por_variavel(ds, args.outdir, data_str, apenas,
                                           complevel=args.complevel, jobs=args.jobs,
-                                          rename=renomear)
+                                          rename=renomear, prefix=args.prefix)
         else:  # cfgrib (padrão, SEM wgrib2)
             print(f"[GRIB2/.ctl] {os.path.basename(args.entrada)} — eccodes streaming")
             print(f"\nData na nomenclatura: {data_str}")
@@ -1080,7 +1120,8 @@ def main():
             print("Convertendo variáveis (1 arquivo por variável):")
             gerados = converter_grib2_cfgrib(info, args.outdir, data_str, apenas,
                                              complevel=args.complevel,
-                                             asname=args.asname, rename=renomear)
+                                             asname=args.asname, rename=renomear,
+                                             prefix=args.prefix)
     # ---- arquivo .grib2 direto ----
     else:
         ds = read_grib_cfgrib(args.entrada)
@@ -1089,7 +1130,7 @@ def main():
         print(f"Saída: {os.path.abspath(args.outdir)}\n")
         gerados = salvar_por_variavel(ds, args.outdir, data_str, apenas,
                                       complevel=args.complevel, jobs=args.jobs,
-                                      rename=renomear)
+                                      rename=renomear, prefix=args.prefix)
 
     dt = (datetime.now() - t0).total_seconds()
     print(f"\nConcluído em {dt:.1f}s. {len(gerados)} arquivo(s) NetCDF gerado(s).")
